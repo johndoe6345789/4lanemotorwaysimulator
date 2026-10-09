@@ -16,8 +16,14 @@ abstract class Link(val kind: LinkKind, val junction: Junction?) {
 
     fun list(lane: Int): ArrayList<Vehicle> = lanes[lane - minLane]
 
-    /** World pose of the point [s] along this link at lateral lane coordinate [lane]. */
-    abstract fun pose(s: Double, lane: Double, out: Pose)
+    /**
+     * World pose of the point [s] along this link at lateral coordinate [lateral]: a (fractional)
+     * lane index on the motorway, or metres right of the centre line on other roads.
+     */
+    abstract fun pose(s: Double, lateral: Double, out: Pose)
+
+    /** Half the drivable width of a single-lane road (m). */
+    open val halfWidth: Double = Road.SLIP_WIDTH / 2
 
     /** Posted speed limit in mph (motorway limits come from the gantries instead). */
     abstract val limitMph: Int
@@ -39,8 +45,8 @@ class MotorwayLink(val cw: Carriageway) : Link(LinkKind.MOTORWAY, null) {
     override val limitMph = Road.NATIONAL_LIMIT_MPH
     override val label = cw.label
 
-    override fun pose(s: Double, lane: Double, out: Pose) {
-        out.x = cw.worldX(Road.laneCenter(lane))
+    override fun pose(s: Double, lateral: Double, out: Pose) {
+        out.x = cw.worldX(Road.laneCenter(lateral))
         out.y = cw.worldY(s)
         out.z = 0.0
         out.heading = cw.heading
@@ -51,8 +57,9 @@ class PathLink(
     kind: LinkKind, junction: Junction, val path: Path, override val limitMph: Int, override val label: String,
 ) : Link(kind, junction) {
     override val length = path.length
-    override fun pose(s: Double, lane: Double, out: Pose) = path.pose(s, out)
+    override fun pose(s: Double, lateral: Double, out: Pose) = path.pose(s, out, lateral)
     override fun advisorySpeed(s: Double) = path.advisorySpeed(s)
+    override val halfWidth = if (kind == LinkKind.LOCAL_IN || kind == LinkKind.LOCAL_OUT || kind == LinkKind.LOOP) 2.0 else Road.SLIP_WIDTH / 2
 
     /** Where vehicles go at the end of this link (null: they leave the simulation). */
     var next: Link? = null
@@ -69,7 +76,8 @@ class RingLink(junction: Junction, val path: Path) : Link(LinkKind.RING, junctio
     override val length = path.length
     override val limitMph = Road.RING_SPEED_MPH
     override val label = "Roundabout"
-    override fun pose(s: Double, lane: Double, out: Pose) = path.pose(wrap(s), out)
+    override fun pose(s: Double, lateral: Double, out: Pose) = path.pose(wrap(s), out, lateral)
+    override val halfWidth = Road.RING_WIDTH / 2
     override fun advisorySpeed(s: Double) = path.advisorySpeed(wrap(s))
     override fun forward(from: Double, to: Double) = wrap(to - from)
     fun wrap(s: Double): Double = ((s % length) + length) % length

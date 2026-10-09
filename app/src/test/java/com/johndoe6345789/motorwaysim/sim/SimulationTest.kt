@@ -117,13 +117,13 @@ class SimulationTest {
     }
 
     @Test
-    fun lorriesNeverUseTheOutsideLane() {
+    fun heavyVehiclesNeverUseTheRightHandLane() {
         val sim = quietSim(7, TrafficLevel.HEAVY)
         sim.autopilot = true
         run(sim, 240.0) { s ->
             for (c in s.vehicles) {
-                if (c.type == VehicleType.LORRY && c.link is MotorwayLink) {
-                    assertFalse("lorry in lane 4", c.occupies(Road.LORRY_BANNED_LANE))
+                if (c.type.rightLaneBanned && c.role == Role.TRAFFIC && c.link is MotorwayLink) {
+                    assertFalse("${c.type.label} in lane 4", c.occupies(Road.RIGHT_HAND_LANE))
                 }
             }
         }
@@ -162,6 +162,30 @@ class SimulationTest {
         assertEquals(0, sim.aiInterventions)
     }
 
+    /**
+     * A simple test driver: steers the player towards lateral position [target]
+     * (lanes on the motorway, metres from the centre line elsewhere).
+     */
+    private fun steerTowards(sim: Simulation, target: Double) {
+        val p = sim.player
+        val scale = if (p.link is MotorwayLink) Road.LANE_WIDTH else 1.0
+        val error = (target - p.lat) * scale
+        val wantedHeading = -(error * 0.05).coerceIn(-0.08, 0.08)
+        sim.steering = ((p.relHeading - wantedHeading) * 12).coerceIn(-1.0, 1.0)
+    }
+
+    /** Signals left, moves to lane 1 and steers into the exit lane, until the player is on the off-slip. */
+    private fun takeTheNextExit(sim: Simulation, step: (Simulation) -> Unit) {
+        sim.toggleIndicator(-1)
+        var guard = 0
+        while (sim.player.link.kind == LinkKind.MOTORWAY && guard++ < 30 * 180) {
+            if (sim.player.indicator == 0) sim.toggleIndicator(-1)
+            steerTowards(sim, if (Road.isDivergeZone(sim.player.s) && Road.junctionOffset(sim.player.s) > Road.DIVERGE_START + 30) -1.0 else 0.0)
+            step(sim)
+        }
+        assertEquals(LinkKind.OFF_SLIP, sim.player.link.kind)
+    }
+
     @Test
     fun playerCanExitGoRoundTheRoundaboutAndJoinTheOtherCarriageway() {
         val sim = quietSim(5, TrafficLevel.MODERATE)
@@ -169,19 +193,14 @@ class SimulationTest {
         val start = sim.player.s
         sim.vehicles.removeAll {
             !it.isPlayer && it.link === sim.player.link && (it.occupies(0) || abs(it.s - start) < 40) &&
-                it.s > start - 150 && it.s < start + 1300
+                it.s > start - 150 && it.s < start + 1600
         }
-        // Get into lane 1 before the next junction, then take the exit.
-        sim.steer(-1)
-        var guard = 0
-        while (!Road.isDivergeZone(sim.player.s) && guard++ < 30 * 120) sim.update(1 / 30.0)
-        assertTrue(Road.isDivergeZone(sim.player.s))
-        assertEquals(0, sim.player.lane)
-        sim.steer(-1)
-        assertEquals(-1, sim.player.lane)
+        takeTheNextExit(sim) { it.update(1 / 30.0) }
+        assertFalse(sim.crashed)
+        assertTrue("booked ${sim.conduct.breaches.map { it.offence }}", sim.conduct.breaches.none { it.offence == Offence.NO_EXIT_SIGNAL })
         sim.autopilot = true // let the autopilot handle the give-way and roundabout
         val seen = HashSet<LinkKind>()
-        guard = 0
+        var guard = 0
         while (guard++ < 30 * 240) {
             sim.update(1 / 30.0)
             seen += sim.player.link.kind
@@ -194,30 +213,38 @@ class SimulationTest {
     }
 
     @Test
-    fun playerChoosesTheRoundaboutExit() {
+    fun playerSteersRoundTheRoundaboutAndChoosesTheExit() {
         val sim = quietSim(8, TrafficLevel.LIGHT)
         sim.vehicles.retainAll { it.isPlayer }
-        sim.steer(-1)
+        takeTheNextExit(sim, ::step)
+        // Slow down on the slip road and drive onto the roundabout.
         var guard = 0
-        while (!Road.isDivergeZone(sim.player.s) && guard++ < 30 * 120) step(sim)
-        sim.steer(-1)
-        // Drive manually: slow down on the slip road and stop at the give-way line.
-        guard = 0
         while (sim.player.link.kind != LinkKind.RING && guard++ < 30 * 240) {
-            sim.brake = sim.player.link.kind == LinkKind.OFF_SLIP && sim.player.v > 10.0
+            sim.brake = sim.player.v > 11.0
+            steerTowards(sim, 0.0)
+            step(sim)
+        }
+        sim.brake = false
+        assertEquals(LinkKind.RING, sim.player.link.kind)
+        // Keep to the inside for a while: still circulating.
+        repeat(30 * 4) {
+            steerTowards(sim, 1.5)
             step(sim)
         }
         assertEquals(LinkKind.RING, sim.player.link.kind)
-        // Circulate for a while, then take the next exit.
-        repeat(30 * 5) { step(sim) }
-        assertEquals(LinkKind.RING, sim.player.link.kind)
-        sim.steer(-1)
-        val chosen = sim.player.ringExit
-        assertNotNull(chosen)
+        // Signal left and move to the outside to leave at the next exit.
+        sim.toggleIndicator(-1)
+        var exit: RingPort? = null
         guard = 0
-        while (sim.player.link.kind == LinkKind.RING && guard++ < 30 * 60) step(sim)
-        assertTrue(sim.player.link === chosen!!.link)
+        while (sim.player.link.kind == LinkKind.RING && guard++ < 30 * 60) {
+            exit = sim.player.ringExit
+            steerTowards(sim, -2.4)
+            step(sim)
+        }
+        assertNotNull(exit)
+        assertTrue("left by ${sim.player.link.label}, expected ${exit!!.name}, lat ${sim.player.lat}", sim.player.link === exit.link)
         assertFalse(sim.crashed)
+        assertEquals("indicator not cancelled", 0, sim.player.indicator)
     }
 
     private fun step(sim: Simulation) {
@@ -229,7 +256,7 @@ class SimulationTest {
     fun policeAndRecoveryClearABreakdown() {
         val sim = quietSim(11)
         sim.autopilot = true
-        sim.triggerIncident()
+        sim.triggerIncident(2)
         val inc = sim.incidents.single()
         assertNotNull("no patrol on scene", inc.police)
         val laneMask = inc.closedLanes
@@ -301,7 +328,7 @@ class SimulationTest {
     @Test
     fun gantriesCloseTheLaneUpstreamOfAnIncident() {
         val sim = quietSim(13)
-        sim.triggerIncident()
+        sim.triggerIncident(1)
         val inc = sim.incidents.single()
         val cw = inc.cw!!
         val g = sim.gantryFor(inc.rearS)
@@ -325,17 +352,107 @@ class SimulationTest {
     }
 
     @Test
-    fun playerCanChangeLanes() {
+    fun playerChangesLaneBySteeringAndTheIndicatorCancels() {
         val sim = quietSim(9)
-        val start = sim.player.lane
-        sim.steer(1)
-        assertEquals(start + 1, sim.player.lane)
-        assertTrue(sim.player.isChangingLane)
         sim.vehicles.retainAll { it.isPlayer }
+        val start = sim.player.lane
+        sim.toggleIndicator(1)
+        assertEquals(1, sim.player.indicator)
         run(sim, 2.0) { it.vehicles.retainAll { v -> v.isPlayer } }
-        assertFalse(sim.player.isChangingLane)
+        run(sim, 8.0) {
+            it.vehicles.retainAll { v -> v.isPlayer }
+            steerTowards(it, start + 1.0)
+        }
+        assertEquals(start + 1, sim.player.lane)
+        assertEquals(start + 1.0, sim.player.lat, 0.1)
+        assertEquals(0, sim.player.indicator)
         val cw = (sim.player.link as MotorwayLink).cw
-        assertEquals(cw.worldX(Road.laneCenter((start + 1).toDouble())), sim.player.pose.x, 1e-6)
-        assertTrue(abs(sim.player.pose.heading - cw.heading) < 1e-6)
+        assertEquals(cw.worldX(Road.laneCenter(start + 1.0)), sim.player.pose.x, 0.4)
+        assertTrue(abs(sim.player.pose.heading - cw.heading) < 0.02)
+        assertTrue(sim.conduct.breaches.isEmpty())
+    }
+
+    @Test
+    fun changingLaneWithoutSignallingIsNoted() {
+        val sim = quietSim(9)
+        sim.vehicles.retainAll { it.isPlayer }
+        val start = sim.player.lane
+        run(sim, 8.0) {
+            it.vehicles.retainAll { v -> v.isPlayer }
+            steerTowards(it, start + 1.0)
+        }
+        assertEquals(start + 1, sim.player.lane)
+        val b = sim.conduct.breaches.single()
+        assertEquals(Offence.NO_SIGNAL, b.offence)
+        assertEquals(0, sim.conduct.points)
+    }
+
+    @Test
+    fun heavyVehicleInTheRightHandLaneGetsPoints() {
+        val sim = quietSim(14)
+        sim.reset(VehicleType.LORRY)
+        assertEquals("HGVs start in lane 1", 0, sim.player.lane)
+        sim.vehicles.retainAll { it.isPlayer }
+        run(sim, 30.0) {
+            it.vehicles.retainAll { v -> v.isPlayer }
+            if (it.player.indicator != 1) it.toggleIndicator(1)
+            steerTowards(it, Road.RIGHT_HAND_LANE.toDouble())
+        }
+        assertTrue(sim.conduct.breaches.any { it.offence == Offence.RIGHT_LANE })
+        assertTrue(sim.conduct.points >= 3)
+    }
+
+    @Test
+    fun tailgatingGetsPointsAndTwelvePointsIsABan() {
+        val sim = quietSim(15)
+        val p = sim.player
+        sim.vehicles.retainAll { it.isPlayer }
+        val lead = Vehicle(9999, VehicleType.LORRY, p.link, p.s + 20.0 + VehicleType.LORRY.length, p.lane, p.v, 1.0, 0.2, false, 0)
+        sim.vehicles.add(lead)
+        run(sim, 12.0) {
+            it.vehicles.retainAll { v -> v.isPlayer || v === lead }
+            p.v = lead.v // sit 20 m behind at motorway speed: well under two seconds
+            steerTowards(it, p.lane.toDouble())
+        }
+        assertTrue(sim.conduct.breaches.any { it.offence == Offence.TAILGATING })
+        assertFalse(sim.conduct.banned)
+        sim.conduct.book(Offence.SPEEDING, 0.0)
+        sim.conduct.book(Offence.UNDERTAKING, 0.0)
+        sim.conduct.book(Offence.RED_X, 0.0)
+        assertTrue(sim.conduct.points >= 12)
+        assertTrue(sim.conduct.banned)
+        sim.reset()
+        assertEquals(0, sim.conduct.points)
+    }
+
+    @Test
+    fun aiTrafficSignalsBeforeChangingLane() {
+        val sim = quietSim(16, TrafficLevel.HEAVY)
+        sim.autopilot = true
+        val prevLane = HashMap<Int, Int>()
+        val prevLink = HashMap<Int, Link>()
+        val signalOn = HashMap<Int, Pair<Int, Double>>()
+        var changes = 0
+        var unsignalled = 0
+        run(sim, 240.0) { s ->
+            for (c in s.vehicles) {
+                if (c.isPlayer || c.role != Role.TRAFFIC) continue
+                val link = c.link
+                val before = prevLane[c.id]
+                if (link is MotorwayLink && prevLink[c.id] === link && before != null && before != c.lane) {
+                    changes++
+                    val dir = if (c.lane > before) 1 else -1
+                    val sig = signalOn[c.id]
+                    if (sig == null || sig.first != dir || s.time - sig.second < 0.6) unsignalled++
+                }
+                prevLane[c.id] = c.lane
+                prevLink[c.id] = link
+                val cur = signalOn[c.id]
+                if (c.indicator == 0) signalOn.remove(c.id)
+                else if (cur == null || cur.first != c.indicator) signalOn[c.id] = c.indicator to s.time
+            }
+        }
+        assertTrue("too few lane changes: $changes", changes > 100)
+        assertEquals("unsignalled lane changes out of $changes", 0, unsignalled)
     }
 }

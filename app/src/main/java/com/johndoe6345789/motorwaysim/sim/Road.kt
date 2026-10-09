@@ -28,8 +28,8 @@ object Road {
     const val GANTRY_SPACING = 1000.0
     const val NATIONAL_LIMIT_MPH = 70
 
-    /** Lorries over 7.5 t may not use the outside lane of a motorway with three or more lanes. */
-    const val LORRY_BANNED_LANE = LANES - 1
+    /** The right-hand lane, barred to goods vehicles over 3.5 t and coaches (Highway Code Rule 265). */
+    const val RIGHT_HAND_LANE = LANES - 1
 
     // Junctions: one every JUNCTION_SPACING metres. Offsets are relative to the junction
     // centre, measured along each carriageway in its direction of travel.

@@ -4,22 +4,29 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.RectF
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.opengl.GLSurfaceView
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.Surface
 import android.view.View
 import android.view.WindowInsets
 import android.widget.FrameLayout
 import javax.microedition.khronos.egl.EGL10
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.egl.EGLDisplay
+import kotlin.math.abs
+import kotlin.math.sign
 
 /**
  * The game screen: a GL surface showing the 3D motorway with the HUD drawn on top.
- * Touch, keyboard and game-controller input are turned into driving commands.
+ * Touch, keyboard, game-controller and (optionally) tilt input are turned into driving commands.
  */
-class GameView(context: Context) : FrameLayout(context) {
+class GameView(context: Context) : FrameLayout(context), SensorEventListener {
     private val hud = Hud(resources.displayMetrics.density)
     private val hudView = HudView(context)
     private val renderer = GameRenderer { state ->
@@ -33,12 +40,16 @@ class GameView(context: Context) : FrameLayout(context) {
         setRenderer(renderer)
         renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
     }
+    private val sensors = context.getSystemService(SensorManager::class.java)
+    private val gravity = sensors?.getDefaultSensor(Sensor.TYPE_GRAVITY) ?: sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
     /** Pointer id → the button it is pressing. */
     private val pointers = HashMap<Int, Hud.Button>()
-    private var keyThrottle = false
-    private var keyBrake = false
+    private val keys = HashSet<Hud.Button>()
     private var wasCrashed = false
+    private var tilt = false
+    private var tiltSteer = 0.0
+    private var resumed = false
 
     init {
         addView(glView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -46,57 +57,108 @@ class GameView(context: Context) : FrameLayout(context) {
         isFocusable = true
         isFocusableInTouchMode = true
         keepScreenOn = true
-        contentDescription = "Four lane motorway driving simulator"
+        contentDescription = "Four lane motorway driving game"
     }
 
     fun onResume() {
+        resumed = true
         glView.onResume()
+        updateSensor()
     }
 
     fun onPause() {
+        resumed = false
         renderer.backgrounded = true
         pointers.clear()
-        keyThrottle = false
-        keyBrake = false
-        applyPedals()
+        keys.clear()
+        applyControls()
+        updateSensor()
         glView.onPause()
     }
 
-    private fun applyPedals() {
+    private fun updateSensor() {
+        val sm = sensors ?: return
+        sm.unregisterListener(this)
+        tiltSteer = 0.0
+        if (tilt && resumed && gravity != null) sm.registerListener(this, gravity, SensorManager.SENSOR_DELAY_GAME)
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        // Gravity along the screen's horizontal axis: tilting the right-hand side down steers right.
+        val x = event.values[0].toDouble()
+        val y = event.values[1].toDouble()
+        val screenX = when (display?.rotation ?: Surface.ROTATION_0) {
+            Surface.ROTATION_90 -> -y
+            Surface.ROTATION_180 -> -x
+            Surface.ROTATION_270 -> y
+            else -> x
+        }
+        // About 25 degrees of tilt is full lock, with a small dead zone.
+        val raw = -screenX / (SensorManager.GRAVITY_EARTH * 0.42)
+        tiltSteer = if (abs(raw) < 0.06) 0.0 else ((abs(raw) - 0.06) / 0.94 * sign(raw)).coerceIn(-1.0, 1.0)
+        applyControls()
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+
+    private fun applyControls() {
         val pressed = pressedButtons()
         renderer.throttle = Hud.Button.GAS in pressed
         renderer.brake = Hud.Button.BRAKE in pressed
+        val left = Hud.Button.STEER_LEFT in pressed
+        val right = Hud.Button.STEER_RIGHT in pressed
+        renderer.steerTarget = when {
+            left && !right -> -1.0
+            right && !left -> 1.0
+            tilt -> tiltSteer
+            else -> 0.0
+        }
+        renderer.tilt = tilt
+        hudView.pressed = pressed
     }
 
     private fun pressedButtons(): Set<Hud.Button> {
         val set = HashSet<Hud.Button>(pointers.values)
-        if (keyThrottle) set.add(Hud.Button.GAS)
-        if (keyBrake) set.add(Hud.Button.BRAKE)
+        set.addAll(keys)
         return set
     }
 
     private fun press(button: Hud.Button) {
         val c = when (button) {
             Hud.Button.PAUSE -> GameRenderer.Command.PAUSE
-            Hud.Button.AUTOPILOT -> GameRenderer.Command.AUTOPILOT
-            Hud.Button.TRAFFIC -> GameRenderer.Command.TRAFFIC
             Hud.Button.VIEW -> GameRenderer.Command.VIEW
+            Hud.Button.AUTOPILOT -> GameRenderer.Command.AUTOPILOT
+            Hud.Button.LIGHTS -> GameRenderer.Command.LIGHTS
+            Hud.Button.IND_LEFT -> GameRenderer.Command.IND_LEFT
+            Hud.Button.IND_RIGHT -> GameRenderer.Command.IND_RIGHT
+            Hud.Button.RESUME -> GameRenderer.Command.RESUME
+            Hud.Button.GARAGE -> GameRenderer.Command.GARAGE
+            Hud.Button.TRAFFIC -> GameRenderer.Command.TRAFFIC
             Hud.Button.INCIDENT -> GameRenderer.Command.INCIDENT
-            Hud.Button.LEFT -> GameRenderer.Command.LEFT
-            Hud.Button.RIGHT -> GameRenderer.Command.RIGHT
-            Hud.Button.GAS, Hud.Button.BRAKE -> return
+            Hud.Button.PREV -> GameRenderer.Command.PREV
+            Hud.Button.NEXT -> GameRenderer.Command.NEXT
+            Hud.Button.DRIVE -> GameRenderer.Command.DRIVE
+            Hud.Button.NEW_LICENCE -> GameRenderer.Command.NEW_LICENCE
+            Hud.Button.TILT -> {
+                tilt = !tilt
+                updateSensor()
+                applyControls()
+                return
+            }
+            Hud.Button.STEER_LEFT, Hud.Button.STEER_RIGHT, Hud.Button.GAS, Hud.Button.BRAKE -> return
         }
         renderer.post(c)
     }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        val state = hudView.state ?: return true
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val i = event.actionIndex
-                val button = hud.buttonAt(event.getX(i), event.getY(i))
+                val button = hud.buttonAt(event.getX(i), event.getY(i), state)
                 if (button == null) {
-                    if (hudView.state?.crashed == true) renderer.post(GameRenderer.Command.CONTINUE)
+                    if (state.crashed && state.screen == Screen.DRIVING) renderer.post(GameRenderer.Command.CONTINUE)
                 } else {
                     pointers[event.getPointerId(i)] = button
                     if (!button.hold) press(button)
@@ -104,51 +166,56 @@ class GameView(context: Context) : FrameLayout(context) {
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                // Let a finger slide between the two pedals.
+                // Let a finger slide between the two pedals, or between the steering buttons.
                 for (i in 0 until event.pointerCount) {
                     val id = event.getPointerId(i)
                     val current = pointers[id] ?: continue
                     if (!current.hold) continue
-                    val now = hud.buttonAt(event.getX(i), event.getY(i))
-                    if (now != null && now.hold && now != current) pointers[id] = now
+                    val now = hud.buttonAt(event.getX(i), event.getY(i), state)
+                    if (now != null && now.hold && now.group == current.group && now != current) pointers[id] = now
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> pointers.remove(event.getPointerId(event.actionIndex))
             MotionEvent.ACTION_CANCEL -> pointers.clear()
         }
-        applyPedals()
-        hudView.pressed = pressedButtons()
+        applyControls()
         return true
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (event.repeatCount > 0) return keyCode in GAME_KEYS || super.onKeyDown(keyCode, event)
-        when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_BUTTON_R2 -> keyThrottle = true
-            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_BUTTON_L2 -> keyBrake = true
-            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_BUTTON_L1 -> press(Hud.Button.LEFT)
-            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_D, KeyEvent.KEYCODE_BUTTON_R1 -> press(Hud.Button.RIGHT)
-            KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_P, KeyEvent.KEYCODE_BUTTON_START -> press(Hud.Button.PAUSE)
-            KeyEvent.KEYCODE_O, KeyEvent.KEYCODE_BUTTON_Y -> press(Hud.Button.AUTOPILOT)
-            KeyEvent.KEYCODE_T, KeyEvent.KEYCODE_BUTTON_X -> press(Hud.Button.TRAFFIC)
-            KeyEvent.KEYCODE_V, KeyEvent.KEYCODE_Z, KeyEvent.KEYCODE_BUTTON_SELECT -> press(Hud.Button.VIEW)
-            KeyEvent.KEYCODE_I -> press(Hud.Button.INCIDENT)
-            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BUTTON_A -> renderer.post(GameRenderer.Command.CONTINUE)
-            else -> return super.onKeyDown(keyCode, event)
+        val screen = hudView.state?.screen
+        if (screen == Screen.GARAGE && (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+            if (event.repeatCount == 0) press(if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) Hud.Button.PREV else Hud.Button.NEXT)
+            return true
         }
-        applyPedals()
-        hudView.pressed = pressedButtons()
+        val held = HELD_KEYS[keyCode]
+        if (held != null) {
+            keys += held
+            applyControls()
+            return true
+        }
+        if (event.repeatCount > 0) return keyCode in TAP_KEYS || super.onKeyDown(keyCode, event)
+        when (keyCode) {
+            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BUTTON_A -> renderer.post(
+                when (screen) {
+                    Screen.GARAGE -> GameRenderer.Command.DRIVE
+                    Screen.PAUSED -> GameRenderer.Command.RESUME
+                    Screen.BANNED -> GameRenderer.Command.NEW_LICENCE
+                    else -> GameRenderer.Command.CONTINUE
+                },
+            )
+            else -> {
+                val b = TAP_KEYS[keyCode] ?: return super.onKeyDown(keyCode, event)
+                press(b)
+            }
+        }
         return true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_BUTTON_R2 -> keyThrottle = false
-            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_BUTTON_L2 -> keyBrake = false
-            else -> return keyCode in GAME_KEYS || super.onKeyUp(keyCode, event)
-        }
-        applyPedals()
-        hudView.pressed = pressedButtons()
+        val held = HELD_KEYS[keyCode] ?: return keyCode in TAP_KEYS || super.onKeyUp(keyCode, event)
+        keys -= held
+        applyControls()
         return true
     }
 
@@ -192,11 +259,25 @@ class GameView(context: Context) : FrameLayout(context) {
     }
 
     companion object {
-        private val GAME_KEYS = setOf(
-            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT,
-            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_S,
-            KeyEvent.KEYCODE_D, KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_P, KeyEvent.KEYCODE_O,
-            KeyEvent.KEYCODE_T, KeyEvent.KEYCODE_V, KeyEvent.KEYCODE_Z, KeyEvent.KEYCODE_I, KeyEvent.KEYCODE_ENTER,
+        /** Keys held down like the on-screen pedals and steering. */
+        private val HELD_KEYS = mapOf(
+            KeyEvent.KEYCODE_DPAD_UP to Hud.Button.GAS, KeyEvent.KEYCODE_W to Hud.Button.GAS, KeyEvent.KEYCODE_BUTTON_R2 to Hud.Button.GAS,
+            KeyEvent.KEYCODE_DPAD_DOWN to Hud.Button.BRAKE, KeyEvent.KEYCODE_S to Hud.Button.BRAKE, KeyEvent.KEYCODE_BUTTON_L2 to Hud.Button.BRAKE,
+            KeyEvent.KEYCODE_A to Hud.Button.STEER_LEFT, KeyEvent.KEYCODE_DPAD_LEFT to Hud.Button.STEER_LEFT,
+            KeyEvent.KEYCODE_D to Hud.Button.STEER_RIGHT, KeyEvent.KEYCODE_DPAD_RIGHT to Hud.Button.STEER_RIGHT,
+        )
+
+        /** Keys that act once per press. The arrow keys steer while driving and browse the garage. */
+        private val TAP_KEYS = mapOf(
+            KeyEvent.KEYCODE_Q to Hud.Button.IND_LEFT, KeyEvent.KEYCODE_BUTTON_L1 to Hud.Button.IND_LEFT,
+            KeyEvent.KEYCODE_E to Hud.Button.IND_RIGHT, KeyEvent.KEYCODE_BUTTON_R1 to Hud.Button.IND_RIGHT,
+            KeyEvent.KEYCODE_SPACE to Hud.Button.PAUSE, KeyEvent.KEYCODE_P to Hud.Button.PAUSE,
+            KeyEvent.KEYCODE_BUTTON_START to Hud.Button.PAUSE, KeyEvent.KEYCODE_ESCAPE to Hud.Button.PAUSE,
+            KeyEvent.KEYCODE_O to Hud.Button.AUTOPILOT, KeyEvent.KEYCODE_BUTTON_Y to Hud.Button.AUTOPILOT,
+            KeyEvent.KEYCODE_T to Hud.Button.TRAFFIC, KeyEvent.KEYCODE_BUTTON_X to Hud.Button.TRAFFIC,
+            KeyEvent.KEYCODE_V to Hud.Button.VIEW, KeyEvent.KEYCODE_BUTTON_SELECT to Hud.Button.VIEW,
+            KeyEvent.KEYCODE_L to Hud.Button.LIGHTS, KeyEvent.KEYCODE_I to Hud.Button.INCIDENT,
+            KeyEvent.KEYCODE_G to Hud.Button.GARAGE,
         )
     }
 }

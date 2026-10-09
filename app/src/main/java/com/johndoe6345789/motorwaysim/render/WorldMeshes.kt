@@ -25,7 +25,7 @@ class SignFace(
 )
 
 /** Static geometry for a stretch of road, positioned at [originY] (world y of its local origin). */
-class WorldPiece(val mesh: Mesh, val originY: Double, val signs: List<SignFace>)
+class WorldPiece(val mesh: Mesh, val originY: Double, val signs: List<SignFace>, val terrain: Mesh? = null)
 
 /**
  * Builds the static scenery: motorway chunks of [CHUNK] metres and whole junctions.
@@ -75,7 +75,75 @@ object WorldMeshes {
         for (cw in Carriageway.entries) carriageway(b, signs, cw, y0)
         centralReservation(b, y0)
         roadside(b, y0)
-        return WorldPiece(b.build(), y0, signs)
+        val by = Terrain.bridgeY(y0 + CHUNK / 2)
+        if (by >= y0 && by < y0 + CHUNK) overbridge(b, by - y0)
+        return WorldPiece(b.build(), y0, signs, terrain(y0))
+    }
+
+    /** Rolling fields either side of the motorway for one chunk. */
+    private fun terrain(y0: Double): Mesh {
+        val b = MeshBuilder(4096).color(GRASS)
+        val step = 20.0
+        for (side in doubleArrayOf(-1.0, 1.0)) {
+            var x = 40.0
+            while (x < 620.0) {
+                var y = 0.0
+                while (y < CHUNK - 1e-6) {
+                    val xa = side * x
+                    val xb = side * (x + step)
+                    val h00 = Terrain.height(xa, y0 + y) - 0.1
+                    val h10 = Terrain.height(xb, y0 + y) - 0.1
+                    val h11 = Terrain.height(xb, y0 + y + step) - 0.1
+                    val h01 = Terrain.height(xa, y0 + y + step) - 0.1
+                    if (side > 0) b.quad(xa, y, h00, xb, y, h10, xb, y + step, h11, xa, y + step, h01)
+                    else b.quad(xb, y, h10, xa, y, h00, xa, y + step, h01, xb, y + step, h11)
+                    y += step
+                }
+                x += step
+            }
+        }
+        return b.build()
+    }
+
+    /** A farm road bridge over the motorway, with earth approach embankments. */
+    private fun overbridge(b: MeshBuilder, y: Double) {
+        val half = 46.0
+        val deck = 7.2
+        val w = 4.5
+        // Deck, its edges and underside.
+        b.color(ASPHALT, 2f)
+        b.flat(-half, y - w, half, y + w, deck)
+        b.color(DECK)
+        b.box(-half, half, y - w - 0.4, y - w, deck - 1.2, deck + 1.0)
+        b.box(-half, half, y + w, y + w + 0.4, deck - 1.2, deck + 1.0)
+        b.quad(-half, y + w, deck - 1.2, half, y + w, deck - 1.2, half, y - w, deck - 1.2, -half, y - w, deck - 1.2)
+        b.color(PAINT)
+        var dx = -half
+        while (dx < half) { b.flat(dx, y - 0.07, dx + 3, y + 0.07, deck + 0.02); dx += 6 }
+        // Piers: central reservation and both verges, and abutments.
+        b.color(CONCRETE)
+        for (px in doubleArrayOf(0.0, -23.6, 23.6)) b.box(px - 0.6, px + 0.6, y - w + 0.5, y + w - 0.5, 0.0, deck - 1.2)
+        for (sx in doubleArrayOf(-1.0, 1.0)) b.box(sx * half - 0.8, sx * half + 0.8, y - w - 0.4, y + w + 0.4, 0.0, deck)
+        // Embankments: the road slopes down to the fields; earth sides fall away.
+        for (sx in doubleArrayOf(-1.0, 1.0)) {
+            val n = 12
+            for (i in 0 until n) {
+                val xa = sx * (half + 130.0 * i / n)
+                val xb = sx * (half + 130.0 * (i + 1) / n)
+                val za = deck * (1 - i.toDouble() / n).let { it * it * (3 - 2 * it) }
+                val zb = deck * (1 - (i + 1).toDouble() / n).let { it * it * (3 - 2 * it) }
+                val sa = w + za * 1.6
+                val sb = w + zb * 1.6
+                val (x0, x1) = if (sx > 0) xa to xb else xb to xa
+                val (z0, z1) = if (sx > 0) za to zb else zb to za
+                val (s0, s1) = if (sx > 0) sa to sb else sb to sa
+                b.color(ASPHALT, 2f)
+                b.quad(x0, y - w, z0, x1, y - w, z1, x1, y + w, z1, x0, y + w, z0)
+                b.color(GRASS)
+                b.quad(x0, y - s0, -0.1, x1, y - s1, -0.1, x1, y - w, z1, x0, y - w, z0)
+                b.quad(x1, y + s1, -0.1, x0, y + s0, -0.1, x0, y + w, z0, x1, y + w, z1)
+            }
+        }
     }
 
     private class Ctx(val b: MeshBuilder, val cw: Carriageway, val y0: Double) {
@@ -109,9 +177,9 @@ object WorldMeshes {
         while (s < sHi - 1e-6) {
             val sb = min(sHi, s + step)
             val extra = Road.hasExtraLane((s + sb) / 2)
-            b.color(ASPHALT)
+            b.color(ASPHALT, 2f)
             c.strip(hs, Road.WIDTH, s, sb, 0.0)
-            b.color(if (extra) ASPHALT else SHOULDER)
+            b.color(if (extra) ASPHALT else SHOULDER, 2f)
             c.strip(if (extra) -0.35 else 0.0, hs, s, sb, 0.0)
             b.color(PAINT)
             c.strip(offside - 0.1, offside + 0.1, s, sb, 0.025)
@@ -145,7 +213,7 @@ object WorldMeshes {
                 b.box(xc - 0.07, xc + 0.07, yc - 0.07, yc + 0.07, 0.0, 1.0)
                 b.color(0xFF101010.toInt())
                 b.box(xc - 0.075, xc + 0.075, yc - 0.075, yc + 0.075, 0.75, 0.9)
-                if (Math.floorMod(p, 5L) == 0L) {
+                if (Math.floorMod(p, 5L) == 0L && abs(c.y(ps) + y0 - Terrain.bridgeY(c.y(ps) + y0)) > 15) {
                     post(b, c.x(-2.4), c.y(ps), 2.4)
                     signs += face(c, -3.0, -1.8, ps, 1.2, 2.3, if (cw == Carriageway.NORTH) "dls_A" else "dls_B")
                 }
@@ -187,7 +255,8 @@ object WorldMeshes {
         var hs0 = sLo
         while (hs0 < sHi - 1e-6) {
             val hs1 = min(sHi, hs0 + 20)
-            if (abs(Road.junctionOffset((hs0 + hs1) / 2)) > 1000) {
+            val mid = c.y((hs0 + hs1) / 2) + y0
+            if (abs(Road.junctionOffset((hs0 + hs1) / 2)) > 1000 && abs(mid - Terrain.bridgeY(mid)) > 15) {
                 val xa = c.x(HEDGE_M - 0.7); val xb = c.x(HEDGE_M + 0.7)
                 val ya = c.y(hs0); val yb = c.y(hs1)
                 b.box(min(xa, xb), max(xa, xb), min(ya, yb), max(ya, yb), 0.0, 1.5)
@@ -263,7 +332,7 @@ object WorldMeshes {
         var k = ceil(y0 / 40).toLong()
         while (k * 40 < y0 + CHUNK) {
             val ly = k * 40 - y0
-            if (abs(Road.junctionOffset(k * 40.0)) > 80) {
+            if (abs(Road.junctionOffset(k * 40.0)) > 80 && abs(k * 40.0 - Terrain.bridgeY(k * 40.0)) > 12) {
                 b.color(STEEL)
                 b.cylinder(0.0, ly, 0.9, 12.0, 0.13, 6)
                 b.box(-2.6, 2.6, ly - 0.06, ly + 0.06, 11.85, 12.0)
@@ -275,23 +344,25 @@ object WorldMeshes {
         }
     }
 
-    /** Deterministic trees in the fields beside the motorway. */
+    /** Deterministic trees in the fields beside the motorway and out on the hills. */
     private fun roadside(b: MeshBuilder, y0: Double) {
         var cell = floor(y0 / 25).toLong()
         while (cell * 25 < y0 + CHUNK) {
-            for (side in 0..1) {
-                val h = hash(cell * 2 + side)
+            for (side in 0..3) {
+                val h = hash(cell * 4 + side)
                 val count = (h % 3).toInt()
                 for (i in 0 until count) {
                     val hi = hash(h + i * 7919L)
-                    val dist = 32.0 + (hi % 900) / 10.0
-                    val x = if (side == 0) -dist else dist
+                    val dist = if (side < 2) 32.0 + (hi % 900) / 10.0 else 130.0 + (hi % 3200) / 10.0
+                    val x = if (side % 2 == 0) -dist else dist
                     val y = cell * 25 + ((hi shr 10) % 250) / 10.0
                     if (y < y0 || y >= y0 + CHUNK || nearJunction(x, y)) continue
+                    if (abs(x) < 200 && abs(y - Terrain.bridgeY(y)) < 25) continue
                     val size = 0.8 + ((hi shr 20) % 60) / 100.0
                     val ly = y - y0
+                    val gz = Terrain.height(x, y) - 0.1
                     b.color(TRUNK)
-                    b.box(x - 0.2, x + 0.2, ly - 0.2, ly + 0.2, 0.0, 2.6 * size)
+                    b.box(x - 0.2, x + 0.2, ly - 0.2, ly + 0.2, gz, gz + 2.6 * size)
                     b.color(
                         when ((hi shr 30) % 3) {
                             0L -> TREE_A
@@ -299,7 +370,7 @@ object WorldMeshes {
                             else -> TREE_C
                         },
                     )
-                    b.crown(x, ly, 1.6 * size, 8.5 * size, 3.0 * size)
+                    b.crown(x, ly, gz + 1.6 * size, gz + 8.5 * size, 3.0 * size)
                 }
             }
             cell++
@@ -366,7 +437,7 @@ object WorldMeshes {
             val a0 = 2 * PI * i / seg
             val a1 = 2 * PI * (i + 1) / seg
             val c0 = cos(a0); val s0 = sin(a0); val c1 = cos(a1); val s1 = sin(a1)
-            b.color(ASPHALT)
+            b.color(ASPHALT, 2f)
             b.quad(ri * c0, ri * s0, z, ro * c0, ro * s0, z, ro * c1, ro * s1, z, ri * c1, ri * s1, z)
             b.color(PAINT)
             val e0 = ri + 0.35; val e1 = ri + 0.5
@@ -441,7 +512,7 @@ object WorldMeshes {
             if (pv != null && !inside) {
                 val (lx0, ly0, rx0, ry0, z0) = pv
                 val (lx1, ly1, rx1, ry1, z1) = cur
-                b.color(ASPHALT)
+                b.color(ASPHALT, 2f)
                 b.quad(lx0, ly0, z0, rx0, ry0, z0, rx1, ry1, z1, lx1, ly1, z1)
                 // Edge lines.
                 b.color(PAINT)

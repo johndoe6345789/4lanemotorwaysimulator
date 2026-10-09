@@ -29,12 +29,15 @@ object Idm {
      * leader [gap] metres ahead (bumper to bumper) that drives at [leaderV].
      * Pass [gap] = [Double.POSITIVE_INFINITY] for a free road.
      */
-    fun accel(type: VehicleType, v: Double, v0: Double, gap: Double, leaderV: Double): Double {
+    fun accel(
+        type: VehicleType, v: Double, v0: Double, gap: Double, leaderV: Double,
+        timeHeadway: Double = type.timeHeadway,
+    ): Double {
         val free = freeAccel(type, v, v0)
         if (gap >= LOOKAHEAD) return free
         val dv = v - leaderV
         val sStar = type.minGap +
-            max(0.0, v * type.timeHeadway + v * dv / (2 * sqrt(type.maxAccel * type.comfortDecel)))
+            max(0.0, v * timeHeadway + v * dv / (2 * sqrt(type.maxAccel * type.comfortDecel)))
         val g = max(gap, 0.01)
         val ratio = sStar / g
         val a = free - type.maxAccel * ratio * ratio

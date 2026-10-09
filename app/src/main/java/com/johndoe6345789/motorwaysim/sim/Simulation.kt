@@ -2,9 +2,12 @@ package com.johndoe6345789.motorwaysim.sim
 
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.tan
 import kotlin.random.Random
 
 enum class TrafficLevel(val label: String, val vehiclesPerKmPerLane: Double, val localRoadInterval: Double) {
@@ -61,12 +64,31 @@ class Simulation(seed: Long = System.nanoTime()) {
     var trafficLevel = TrafficLevel.MODERATE
     var incidentsEnabled = true
 
-    /** When true the player's car drives itself using the same model as the AI traffic. */
+    /** The vehicle the player drives. Change it with [reset]. */
+    var playerType = VehicleType.CAR
+        private set
+
+    /** When true the player's vehicle drives itself using the same model as the AI traffic. */
     var autopilot = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (::player.isInitialized) handOver(value)
+        }
 
     // Player controls (manual driving).
     var throttle = false
     var brake = false
+
+    /** Steering input, -1 (full left) to 1 (full right). */
+    var steering = 0.0
+
+    /** Highway Code conduct monitor for the player's driving. */
+    val conduct = HighwayCode(this)
+
+    /** Recovery jobs completed by the player. */
+    var jobsDone = 0
+        internal set
 
     /** True from a crash until the player continues in a new car. */
     var crashed = false
@@ -90,6 +112,10 @@ class Simulation(seed: Long = System.nanoTime()) {
     var aiInterventions = 0
         private set
 
+    /** What the safety net last had to fix, for diagnostics. */
+    var lastIntervention = ""
+        private set
+
     val incidents = ArrayList<Incident>()
     internal val responders = Responders(this)
     val events = ArrayList<SimEvent>()
@@ -101,7 +127,8 @@ class Simulation(seed: Long = System.nanoTime()) {
     private val localSpawnTimers = LinkedHashMap<PathLink, Double>()
     private val toRemove = ArrayList<Vehicle>()
 
-    fun reset() {
+    fun reset(type: VehicleType = playerType) {
+        playerType = type
         vehicles.clear()
         incidents.clear()
         signals.clear()
@@ -117,10 +144,14 @@ class Simulation(seed: Long = System.nanoTime()) {
         aiInterventions = 0
         throttle = false
         brake = false
+        steering = 0.0
+        jobsDone = 0
+        conduct.reset()
         nextIncidentTime = 70.0 + rng.nextDouble() * 90.0
 
         val mw = network.motorway.getValue(Carriageway.NORTH)
-        player = newPlayer(mw, START_S, 1, Units.mphToMs(60.0))
+        val startLane = if (type.rightLaneBanned) 0 else 1
+        player = newPlayer(mw, START_S, startLane, min(Units.mphToMs(55.0), type.maxSpeed))
         player.updatePose()
         vehicles.add(player)
         network.maintain(focusY, JUNCTION_RANGE)
@@ -131,9 +162,19 @@ class Simulation(seed: Long = System.nanoTime()) {
     }
 
     private fun newPlayer(link: Link, s: Double, lane: Int, v: Double) = Vehicle(
-        id = nextId++, type = VehicleType.CAR, link = link, s = s, lane = lane, v = v,
-        desiredFactor = 1.0, politeness = 0.3, yieldsToMergers = true, color = PLAYER_COLOR, isPlayer = true,
-    )
+        id = nextId++, type = playerType, link = link, s = s, lane = lane, v = v,
+        desiredFactor = 1.0, politeness = 0.3, yieldsToMergers = true,
+        color = when (playerType) {
+            VehicleType.POLICE -> POLICE_COLOR
+            VehicleType.RECOVERY -> RECOVERY_COLOR
+            else -> PLAYER_COLOR
+        },
+        isPlayer = true,
+    ).also {
+        it.headway = 2.0
+        it.free = !autopilot
+        it.lat = lane.toDouble()
+    }
 
     // ---------------------------------------------------------------- queries
 
@@ -177,47 +218,69 @@ class Simulation(seed: Long = System.nanoTime()) {
 
     // ---------------------------------------------------------------- controls
 
-    /**
-     * Steering input from the player. On the motorway it changes lane (◀ in lane 1 at a junction
-     * takes the exit); on a roundabout ◀ takes the next exit and ▶ stays on the roundabout.
-     */
-    fun steer(direction: Int) {
+    /** Switches an indicator on, or off if it is already on (-1 left, 1 right). */
+    fun toggleIndicator(direction: Int) {
         if (crashed) return
-        autopilot = false
+        player.indicator = if (player.indicator == direction) 0 else direction
+        indicatorFrom = player.lane
+        if (player.indicator != 0) conduct.signalled(player.indicator)
+    }
+
+    /** The lane the player was in when they signalled; the indicator cancels itself once the move is done. */
+    private var indicatorFrom = 0
+
+    /** Blue lights (police) or amber beacons (recovery) on the player's vehicle. */
+    fun toggleBeacon() {
         val p = player
-        when (val link = p.link) {
-            is MotorwayLink -> {
-                if (p.isChangingLane) return
-                val target = p.lane + direction
-                if (target == -1) {
-                    if (!Road.hasExtraLane(p.s)) {
-                        post("The hard shoulder is for emergencies only", warning = true)
-                        return
-                    }
-                    if (Road.isMergeZone(p.s)) return
-                }
-                if (target < -1 || target >= Road.LANES) return
-                p.startLaneChange(target, time, PLAYER_LANE_CHANGE_TIME)
-            }
-            is RingLink -> {
-                p.ringExit = if (direction < 0) link.junction!!.nextExit(p.s) else null
-            }
-            else -> Unit
+        p.beacon = when {
+            p.beacon != Beacon.NONE -> Beacon.NONE
+            p.type == VehicleType.POLICE -> Beacon.BLUE
+            p.type == VehicleType.RECOVERY -> Beacon.AMBER
+            else -> Beacon.NONE
         }
     }
 
-    /** Places a broken-down vehicle in a random lane some way ahead on the player's carriageway. */
-    fun triggerIncident() {
+    /** Swaps between free steering and lane-following when the autopilot is switched. */
+    private fun handOver(auto: Boolean) {
+        val p = player
+        if (p.role == Role.WRECK) return
+        if (auto) {
+            p.free = false
+            if (p.link is MotorwayLink) {
+                val off = Road.junctionOffset(p.s)
+                val lowest = if (Road.isDivergeZone(p.s) && off < Road.DIVERGE_END - 40 || Road.isMergeZone(p.s)) -1 else 0
+                val l = p.lat.roundToInt().coerceIn(lowest, Road.LANES - 1).let { if (!p.canUseLane(it) && it >= 0) it - 1 else it }
+                p.setFreeLane(l)
+                p.latCorrection = p.lat - l
+            } else {
+                p.setFreeLane(0)
+                p.latCorrection = p.lat
+            }
+            p.indicator = 0
+        } else {
+            p.lat = p.lateralLane
+            p.latCorrection = 0.0
+            p.free = true
+        }
+        p.relHeading = 0.0
+    }
+
+    /** Places a broken-down vehicle some way ahead on the player's carriageway, in [inLane] (-1 is the hard shoulder) or a random lane. */
+    fun triggerIncident(inLane: Int? = null) {
         if (crashed) return
         val link = (player.link as? MotorwayLink) ?: network.motorway.getValue(Carriageway.NORTH)
         val cw = link.cw
-        val lane = rng.nextInt(Road.LANES)
+        // Most broken-down drivers manage to "go left" onto the hard shoulder (Rule 277);
+        // the rest stop in a live lane.
+        val lane = inLane ?: if (rng.nextDouble() < 0.55) -1 else rng.nextInt(Road.LANES)
         val ahead = if (player.link === link) player.s else cw.sOf(focusY)
         var s = ahead + 820.0
-        if (Road.hasExtraLane(s)) s += 300.0
+        // Keep the whole scene, from the queue behind to the recovery truck in front, clear of slip lanes.
+        while (Road.hasExtraLane(s + 60) || Road.hasExtraLane(s) || Road.hasExtraLane(s - 200)) s += 150.0
         vehicles.removeAll { !it.isPlayer && it.link === link && it.occupies(lane) && it.s > s - 160 && it.rear < s + 20 }
         val type = if (rng.nextDouble() < 0.25) VehicleType.VAN else VehicleType.CAR
         val bd = Vehicle(nextId++, type, link, s, lane, 0.0, 1.0, 0.0, false, CAR_COLORS[rng.nextInt(CAR_COLORS.size)])
+        if (lane == -1) bd.latCorrection = -0.1 // well over to the left
         bd.updatePose()
         vehicles.add(bd)
         responders.report(listOf(bd), crash = false)
@@ -237,7 +300,7 @@ class Simulation(seed: Long = System.nanoTime()) {
                 val probe = newPlayer(link, anchor, lane, 0.0)
                 val lead = findLead(probe, lane, Lead())
                 probe.v = if (lead.vehicle != null) min(lead.vehicle!!.v, 31.0) else 27.0
-                if (fitsAt(probe, link, lane)) {
+                if (fitsAt(probe, link, lane) && probe.canUseLane(lane)) {
                     wreck.isPlayer = false
                     player = probe
                     vehicles.add(probe)
@@ -275,26 +338,32 @@ class Simulation(seed: Long = System.nanoTime()) {
         rebuildLists()
 
         for (c in vehicles) c.acc = computeAccel(c)
+        warnOfQueues()
 
         for (c in vehicles) {
             if (c.role == Role.WRECK) continue
-            if (c.isPlayer && !autopilot) continue
+            if (c.isPlayer && c.free) continue
             if (c.link.kind == LinkKind.OFF_SLIP || c.link.kind == LinkKind.LOCAL_IN) decideEntry(c)
             if (time >= c.nextDecisionTime) {
                 c.nextDecisionTime = time + 0.35 + rng.nextDouble() * 0.35
                 if (c.link is MotorwayLink) decideLaneChange(c)
                 if (c.link is RingLink && c.ringExit == null) c.ringExit = chooseExit(c, c.link.junction!!, c.enteredFrom)
             }
+            roundaboutSignals(c)
         }
-        playerAssists()
 
         val before = player.s
         val beforeLink = player.link
+        val decay = exp(-dt * 2.5)
         for (c in vehicles) {
             if (c.role == Role.WRECK) continue
+            if (c.latCorrection != 0.0) c.latCorrection = if (abs(c.latCorrection) < 0.01) 0.0 else c.latCorrection * decay
             if (responders.controlsPosition(c)) continue
+            if (c.isPlayer && c.free) {
+                if (!crashed) drivePlayer(c, dt)
+                continue
+            }
             c.v = max(0.0, c.v + c.acc * dt)
-            if (c.isPlayer) c.v = min(c.v, PLAYER_TOP_SPEED)
             val ds = c.v * dt
             c.s += ds
             c.advanceLaneChange(dt)
@@ -313,6 +382,7 @@ class Simulation(seed: Long = System.nanoTime()) {
         if (!crashed) {
             checkPlayerCollision()
             checkSpeedCamera(beforeLink, before)
+            if (!crashed) conduct.update(dt, beforeLink, before)
         }
 
         responders.update(dt)
@@ -406,13 +476,13 @@ class Simulation(seed: Long = System.nanoTime()) {
 
     private fun idmTo(c: Vehicle, v0: Double, leader: Vehicle?): Double {
         if (leader == null) return Idm.freeAccel(c.type, c.v, v0)
-        return Idm.accel(c.type, c.v, v0, leader.rear - c.s, leader.v)
+        return Idm.accel(c.type, c.v, v0, leader.rear - c.s, leader.v, c.headway)
     }
 
     /** IDM acceleration in lane [l], including the no-undertaking rule relative to lane l+1. */
     private fun accelInLane(c: Vehicle, l: Int, v0: Double): Double {
         val lead = findLead(c, l, scratchLead)
-        var a = Idm.accel(c.type, c.v, v0, lead.gap, lead.speed)
+        var a = Idm.accel(c.type, c.v, v0, lead.gap, lead.speed, c.headway)
         val link = c.link
         if (link is MotorwayLink && l >= 0 && c.v > UNDERTAKE_SPEED && l + 1 < Road.LANES && !c.isResponder) {
             val right = nearestAhead(link, l + 1, c.s, c, max(60.0, 2.5 * c.v))
@@ -425,22 +495,16 @@ class Simulation(seed: Long = System.nanoTime()) {
 
     private fun computeAccel(c: Vehicle): Double {
         if (c.role == Role.WRECK) return 0.0
-        if (c.isPlayer && !autopilot) {
-            val drag = 0.2 + 0.00035 * c.v * c.v
-            return when {
-                brake -> -8.0
-                throttle -> 3.4 * (1 - (c.v / PLAYER_TOP_SPEED).let { it * it }) - drag + 0.2
-                else -> 0.0 // cruise control holds the current speed
-            }
-        }
+        if (c.isPlayer && c.free) return c.acc
         val v0 = desiredSpeedOf(c)
         var a = accelInLane(c, c.lane, v0)
         val link = c.link
         if (link !is MotorwayLink) return a
         if (c.isChangingLane) {
-            a = min(a, findLead(c, c.fromLane, scratchLead).let { Idm.accel(c.type, c.v, v0, it.gap, it.speed) })
-        } else if (c.yieldsToMergers) {
-            // Let a driver waiting to merge into our lane in ahead of us ("zip merging").
+            a = min(a, findLead(c, c.fromLane, scratchLead).let { Idm.accel(c.type, c.v, v0, it.gap, it.speed, c.headway) })
+        } else if (c.yieldsToMergers && c.v < 13.0) {
+            // Let a driver waiting to merge into our lane in ahead of us: merging in turn, which
+            // Rule 134 recommends only at low speed.
             for (d in intArrayOf(-1, 1)) {
                 val l = c.lane + d
                 if (l < link.minLane || l > link.maxLane) continue
@@ -476,13 +540,17 @@ class Simulation(seed: Long = System.nanoTime()) {
         val exiting = c.exitJunction == nextK && !c.isPlayer
         val inDiverge = Road.isDivergeZone(c.s)
         val inMerge = Road.isMergeZone(c.s)
-        if (c.lane == -1 && inDiverge) return // committed to the exit
+        if (c.lane == -1 && inDiverge) {
+            c.indicator = -1 // committed to the exit; keep signalling left (Rule 273)
+            return
+        }
         if (c.exitJunction != null && c.exitJunction != nextK) c.exitJunction = null // missed it
 
+        // Rule 258: leave a lane closed by a red X (shown up to a kilometre before the scene).
         var urgentAny = 0.0
-        val blocked = closedAhead(cw, c.lane, c.s, 700.0)
+        val blocked = closedAhead(cw, c.lane, c.s, CLOSURE_REACT)
         if (blocked != null && !(c.task != null && c.task!!.lane == c.lane)) {
-            urgentAny = 1.0 + 4.0 * (1.0 - (blocked.rearS - c.s) / 700.0).coerceIn(0.0, 1.0)
+            urgentAny = 1.0 + 4.0 * (1.0 - (blocked.rearS - c.s) / CLOSURE_REACT).coerceIn(0.0, 1.0)
         }
         val cooldown = if (urgentAny > 0 || exiting || c.lane == -1 || c.task != null) 1.2 else LANE_CHANGE_COOLDOWN
         if (time - c.lastLaneChangeTime < cooldown) return
@@ -499,12 +567,13 @@ class Simulation(seed: Long = System.nanoTime()) {
             val t = c.lane + dir
             if (!laneAllowed(c, t, exiting, inDiverge, inMerge)) continue
             val responderTarget = c.task?.let { responders.targetLane(c) == t } ?: false
-            if (!responderTarget && closedAhead(cw, t, c.s, 700.0) != null) continue
+            if (!responderTarget && closedAhead(cw, t, c.s, CLOSURE_REACT) != null) continue
 
             var urgency = urgentAny
             urgency += routeUrgency(c, dir, exiting, centre, off)
             urgency += responders.laneUrgency(c, t)
             urgency += moveOverUrgency(c, link, dir)
+            urgency += hardShoulderUrgency(c, link, t)
 
             val bSafe = if (urgency > 3.0 || (urgency > 0 && c.v < 8.0)) 6.0 else SAFE_BRAKING
             val newLeader = nearestAhead(link, t, c.s, c, Idm.LOOKAHEAD)
@@ -515,6 +584,10 @@ class Simulation(seed: Long = System.nanoTime()) {
             var aNfNew = 0.0
             if (safe && newFollower != null) {
                 if (c.rear - newFollower.s < newFollower.type.minGap) safe = false
+                // Rule 267: after overtaking, don't cut in on the vehicle you have passed.
+                if (dir < 0 && urgency < 1 && newFollower.role != Role.WRECK &&
+                    (c.rear - newFollower.s) / max(newFollower.v, 1.0) < 1.0
+                ) safe = false
                 else if (newFollower.role != Role.WRECK) {
                     val v0f = desiredSpeedOf(newFollower)
                     aNfOld = idmTo(newFollower, v0f, newLeader)
@@ -547,6 +620,15 @@ class Simulation(seed: Long = System.nanoTime()) {
         }
 
         if (bestTarget != Vehicle.NO_LANE) {
+            // Mirrors – Signal – Manoeuvre (Rules 133, 161 and 163): signal first, then move.
+            val needed = if (bestScore > 3.0 || c.task != null) 0.7 else SIGNAL_TIME
+            if (c.signalLane != bestTarget) {
+                c.signalLane = bestTarget
+                c.signalSince = time
+                c.indicator = if (bestTarget > c.lane) 1 else -1
+                return
+            }
+            if (time - c.signalSince < needed) return
             val duration = when {
                 c.isPlayer -> 2.5
                 bestTarget == -1 || c.lane == -1 -> 2.2
@@ -558,13 +640,76 @@ class Simulation(seed: Long = System.nanoTime()) {
             link.list(bestTarget).add(c)
             link.list(bestTarget).sortWith(BY_POSITION)
         } else {
+            c.signalLane = Vehicle.NO_LANE
             c.wantsLane = wanted
             c.indicator = if (wanted != Vehicle.NO_LANE) (if (wanted > c.lane) 1 else -1) else 0
+            // Rule 273: signal left in good time when leaving the motorway.
+            if (exiting && c.lane == 0 && centre + Road.DIVERGE_START - c.s < 300) c.indicator = -1
+        }
+    }
+
+    /**
+     * Rule 264: give room to people and vehicles stopped on the hard shoulder by moving out of
+     * lane 1 if it is safe, and don't move back in until past them. Also rejoining from the hard
+     * shoulder after a breakdown (Rule 278).
+     */
+    private fun hardShoulderUrgency(c: Vehicle, link: MotorwayLink, t: Int): Double {
+        if (c.lane == -1 && !Road.hasExtraLane(c.s) && t == 0 && c.role != Role.WRECK && c.task?.arrived != true) return 3.0
+        if (c.isResponder || c.role == Role.WRECK) return 0.0
+        if (c.lane != 0 && !(c.lane == 1 && t == 0)) return 0.0
+        val stop = stoppedOnHardShoulder(link, c.s - 40, 260.0) ?: return 0.0
+        if (stop.rear < c.s - 30) return 0.0
+        return when {
+            c.lane == 0 && t == 1 -> 1.3
+            c.lane == 1 && t == 0 -> -1.5
+            else -> 0.0
+        }
+    }
+
+    private fun stoppedOnHardShoulder(link: MotorwayLink, from: Double, within: Double): Vehicle? {
+        for (o in link.list(-1)) {
+            if (o.s < from || o.s - from > within) continue
+            if (o.v < 1.0 && !Road.hasExtraLane(o.s)) return o
+        }
+        return null
+    }
+
+    /** Rule 116: briefly use hazard lights to warn drivers behind of a sudden queue ahead. */
+    private fun warnOfQueues() {
+        for (c in vehicles) {
+            if (c.isPlayer || c.role != Role.TRAFFIC || c.link !is MotorwayLink) continue
+            if (c.v > 18 && c.acc < -3.5 && time > c.hazardUntil + 10) c.hazardUntil = time + 3.5
+        }
+    }
+
+    /**
+     * Rule 186 signals at roundabouts: signal left for the first exit, right for exits beyond
+     * straight ahead, nothing for those in between; then left after passing the exit before yours.
+     */
+    private fun roundaboutSignals(c: Vehicle) {
+        val link = c.link
+        val j = link.junction ?: return
+        val exit = c.ringExit ?: return
+        val ring = j.ring
+        val from = (if (link is RingLink) c.enteredFrom else link as? PathLink)?.ringPort ?: return
+        val around = ring.forward(from.ringS, exit.ringS) / ring.length
+        val approach = when {
+            around < 0.3 -> -1
+            around > 0.55 -> 1
+            else -> 0
+        }
+        if (link is RingLink) {
+            val previous = j.exits.filter { it !== exit }.minBy { ring.forward(it.ringS, exit.ringS) }
+            val pastPrevious = ring.forward(c.s, exit.ringS) < ring.forward(previous.ringS, exit.ringS)
+            c.indicator = if (pastPrevious || approach < 0) -1 else approach
+        } else if (link.kind == LinkKind.OFF_SLIP || link.kind == LinkKind.LOCAL_IN) {
+            c.indicator = if (link.length - c.s < 70) approach else 0
         }
     }
 
     private fun laneAllowed(c: Vehicle, t: Int, exiting: Boolean, inDiverge: Boolean, inMerge: Boolean): Boolean {
         if (t == -1) {
+            if (c.task != null && responders.targetLane(c) == -1) return true
             if (!inDiverge || !exiting) return false
             val zoneEnd = c.s - Road.junctionOffset(c.s) + Road.DIVERGE_END
             return zoneEnd - c.s > c.v * 2.4 + 15
@@ -669,21 +814,126 @@ class Simulation(seed: Long = System.nanoTime()) {
         return choices.last()
     }
 
-    /** Small helpers for a manually driven player car. */
-    private fun playerAssists() {
-        val p = player
-        if (crashed || autopilot) return
-        val link = p.link
-        if (link is MotorwayLink && p.lane == -1 && !p.isChangingLane) {
-            val off = Road.junctionOffset(p.s)
-            // The acceleration lane is ending: merge now.
-            if (off in Road.MERGE_START..Road.MERGE_END && off > Road.MERGE_END - 30) {
-                p.startLaneChange(0, time, PLAYER_LANE_CHANGE_TIME)
-            }
+    // ---------------------------------------------------------------- the player's driving
+
+    /** The speed limit (mph) for the player's vehicle where it is now (Rule 124 and the signs). */
+    fun playerLimitMph(): Int = min(limitMphFor(player), player.type.motorwayLimitMph)
+
+    /** Pedals, steering and the road under the wheels for a freely driven vehicle. */
+    private fun drivePlayer(p: Vehicle, dt: Double) {
+        // A recovery truck backing up to a casualty vehicle is driven by the recovery logic.
+        if (p.task?.arrived == true) return
+        val t = p.type
+        val drag = 0.12 + 0.00038 * p.v * p.v * (if (t.isHeavy) 1.6 else 1.0)
+        val power = min(4.2, t.maxAccel * 2.0)
+        p.acc = when {
+            brake -> -t.maxBraking
+            throttle -> power * (1 - (p.v / t.maxSpeed).let { it * it }) - drag
+            else -> 0.0 // cruise control holds the current speed
         }
-        if (link is RingLink) {
-            val exit = p.ringExit
-            p.indicator = if (exit != null && link.forward(p.s, exit.ringS) < 40) -1 else 0
+        p.v = (p.v + p.acc * dt).coerceIn(0.0, t.maxSpeed)
+        // Bicycle-model steering; the vehicle straightens up along the road when you let go.
+        val steerMax = 0.5 / (1 + p.v / 6.0)
+        val yawRate = -p.v / t.wheelbase * tan(steering * steerMax)
+        p.relHeading = (p.relHeading + yawRate * dt).coerceIn(-0.6, 0.6)
+        if (abs(steering) < 0.05) p.relHeading *= exp(-dt * 2.4)
+        val ds = p.v * cos(p.relHeading) * dt
+        val side = -p.v * sin(p.relHeading) * dt
+        p.s += ds
+        val link = p.link
+        if (link is MotorwayLink) {
+            p.lat += side / Road.LANE_WIDTH
+            val hw = p.width / 2 + 0.15
+            val lo = (hw - Road.HARD_SHOULDER) / Road.LANE_WIDTH - 0.5
+            val hi = (Road.WIDTH - hw - Road.HARD_SHOULDER) / Road.LANE_WIDTH - 0.5
+            if (p.lat < lo || p.lat > hi) scrape(p, dt)
+            p.lat = p.lat.coerceIn(lo, hi)
+        } else {
+            p.lat += side
+            val lim = link.halfWidth - p.width / 2 - 0.15
+            if (abs(p.lat) > lim) scrape(p, dt)
+            p.lat = p.lat.coerceIn(-lim, lim)
+        }
+        transferFree(p, ds)
+        if (p.link is MotorwayLink) p.setFreeLane(p.lat.roundToInt().coerceIn(-1, Road.LANES - 1)) else p.setFreeLane(0)
+        // Self-cancelling indicator, as the wheel straightens after the lane change.
+        if (p.link is MotorwayLink && p.indicator != 0 && (p.lane - indicatorFrom) * p.indicator > 0 &&
+            abs(p.lat - p.lane) < 0.25 && abs(p.relHeading) < 0.03
+        ) p.indicator = 0
+    }
+
+    private var lastScrape = -10.0
+
+    /** Brushing the barrier: lose speed and straighten up. */
+    private fun scrape(p: Vehicle, dt: Double) {
+        p.relHeading *= 0.5
+        p.v *= 1 - 0.6 * dt
+        if (time - lastScrape > 3) post("Scraped the barrier!", warning = true)
+        lastScrape = time
+    }
+
+    /**
+     * Road changes for a freely steered vehicle are decided by where it is: in the diverge lane
+     * when the slip road splits off, on the outside of the roundabout when passing an exit.
+     */
+    private fun transferFree(p: Vehicle, ds: Double) {
+        repeat(3) {
+            when (val link = p.link) {
+                is MotorwayLink -> {
+                    val off = Road.junctionOffset(p.s)
+                    if (p.lat < -0.5 && off >= Road.DIVERGE_END && off - ds < Road.DIVERGE_END) {
+                        val k = link.cw.junctionAt(p.s - off)
+                        val slip = network.junction(k).offSlip.getValue(link.cw)
+                        val latM = (p.lat + 1) * Road.LANE_WIDTH
+                        conduct.leftMotorway()
+                        p.moveTo(slip, off - Road.DIVERGE_END, 0)
+                        p.lat = latM
+                        p.enteredFrom = slip
+                        p.ringExit = null
+                    } else return
+                }
+                is RingLink -> {
+                    p.s = link.wrap(p.s)
+                    p.ringTravelled += ds
+                    val j = link.junction!!
+                    val next = j.nextExit(p.s - ds, 0.0)
+                    val d = link.forward(p.s - ds, next.ringS)
+                    if (d <= ds && p.lat < -1.0) {
+                        // Kept to the outside (left): leave at this exit.
+                        p.moveTo(next.link, ds - d, 0)
+                        p.lat = (p.lat + 1.5).coerceIn(-1.0, 1.0)
+                        p.ringExit = null
+                        if (p.indicator < 0) p.indicator = 0
+                    } else {
+                        p.ringExit = j.nextExit(p.s, 0.0)
+                        return
+                    }
+                }
+                is PathLink -> {
+                    if (p.s < link.length) return
+                    val over = p.s - link.length
+                    val next = link.next ?: return
+                    val latM = p.lat
+                    when (link.kind) {
+                        LinkKind.OFF_SLIP, LinkKind.LOCAL_IN -> {
+                            val ring = next as RingLink
+                            p.moveTo(ring, ring.wrap(link.nextS + over), 0)
+                            p.ringTravelled = over - ds // the ring branch adds this step's travel
+                            p.enteredFrom = link
+                            p.lat = latM
+                            conduct.joinedRoundabout()
+                        }
+                        LinkKind.ON_SLIP -> {
+                            p.moveTo(next, link.nextS + over, -1)
+                            p.lat = -1 + latM / Road.LANE_WIDTH
+                        }
+                        else -> {
+                            p.moveTo(next, link.nextS + over, 0)
+                            p.lat = latM
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -693,6 +943,11 @@ class Simulation(seed: Long = System.nanoTime()) {
         for (link in network.allLinks()) for (l in link.lanes) l.clear()
         for (c in vehicles) {
             val link = c.link
+            if (c.free && link is MotorwayLink) {
+                // A freely steered vehicle is in every lane it overlaps.
+                for (l in link.minLane..link.maxLane) if (c.occupies(l)) link.list(l).add(c)
+                continue
+            }
             link.list(c.lane).add(c)
             if (c.isChangingLane && c.fromLane != c.lane) link.list(c.fromLane).add(c)
         }
@@ -853,11 +1108,13 @@ class Simulation(seed: Long = System.nanoTime()) {
     /** A position on [link] where [c] must stop, or -infinity. */
     private fun virtualStop(c: Vehicle, link: Link, l: Int, from: Double): Double {
         if (link is MotorwayLink) {
+            if (link === c.link) responders.stopPoint(c, l)?.let { return it }
             if (l == -1) {
                 val off = Road.junctionOffset(from)
                 if (off in Road.MERGE_START - 1.0..Road.MERGE_END) return from - off + Road.MERGE_END
+                // The hard shoulder ends where the next slip road joins: rejoin before then (Rule 278).
+                if (off in Road.MERGE_START - 400.0..Road.MERGE_START - 1.0) return from - off + Road.MERGE_START - HARD_SHOULDER_END_GAP
             }
-            if (link === c.link) responders.stopPoint(c, l)?.let { return it }
             return Double.NEGATIVE_INFINITY
         }
         if ((link.kind == LinkKind.OFF_SLIP || link.kind == LinkKind.LOCAL_IN) && !c.committed &&
@@ -881,6 +1138,9 @@ class Simulation(seed: Long = System.nanoTime()) {
                     if (f.isPlayer || l.isPlayer || f.role == Role.WRECK || responders.controlsPosition(f)) continue
                     val rear = l.s - occupiedLength(l)
                     if (f.s > rear - 0.2) {
+                        lastIntervention = "t=${"%.1f".format(time)} ${link.label} lane ${link.lanes.indexOf(list) + link.minLane}: " +
+                            "${f.type}#${f.id} ${f.role} (lane ${f.fromLane}->${f.lane}) ran ${"%.1f".format(f.s - rear)} m into " +
+                            "${l.type}#${l.id} ${l.role} (lane ${l.fromLane}->${l.lane}) at s=${"%.0f".format(l.s)}"
                         f.s = rear - 0.2
                         f.v = min(f.v, l.v)
                         aiInterventions++
@@ -941,6 +1201,7 @@ class Simulation(seed: Long = System.nanoTime()) {
         }
         // The wreck stays the "player" (followed by the camera) until the player continues.
         responders.report(wrecks, crash = true)
+        if (!autopilot) conduct.book(Offence.COLLISION)
         updateSignals()
     }
 
@@ -950,10 +1211,12 @@ class Simulation(seed: Long = System.nanoTime()) {
         val g = gantryFor(player.s)
         if (gantryFor(before) == g) return
         if (time - signalAt(link.cw, g).since < CAMERA_GRACE_PERIOD) return
-        val limitMph = limitMphAt(link.cw, player.s)
+        val limitMph = playerLimitMph()
         val mph = Units.msToMph(player.v)
+        if (player.beacon == Beacon.BLUE || autopilot) return // emergency vehicles on blue lights are exempt
         // Typical enforcement threshold: limit + 10% + 2 mph.
         if (mph > limitMph * 1.1 + 2) {
+            conduct.book(Offence.SPEED_CAMERA)
             cameraFlashes++
             lastFlashTime = time
             lastFlashSpeedMph = mph.toInt()
@@ -1140,23 +1403,27 @@ class Simulation(seed: Long = System.nanoTime()) {
     internal fun newVehicle(link: Link, lane: Int, s: Double, v: Double, forceType: VehicleType? = null): Vehicle {
         val r = rng.nextDouble()
         var type = forceType ?: when {
-            r < 0.70 -> VehicleType.CAR
+            r < 0.66 -> VehicleType.CAR
+            r < 0.70 -> VehicleType.SPORTS
             r < 0.84 -> VehicleType.VAN
             r < 0.96 -> VehicleType.LORRY
             else -> VehicleType.COACH
         }
         // Heavy vehicles keep to the nearside lanes.
-        if (forceType == null && type.isHeavy && (lane >= 2 && rng.nextDouble() < 0.8 || lane == Road.LORRY_BANNED_LANE)) {
+        if (forceType == null && type.isHeavy && (lane >= 2 && rng.nextDouble() < 0.8 || lane == Road.RIGHT_HAND_LANE)) {
             type = VehicleType.CAR
         }
+        // Rule 261: most drivers keep to the limit; a few creep a little over it.
         val factor = when (type) {
-            VehicleType.CAR -> 0.92 + rng.nextDouble() * 0.24 // 64–81 mph on a 70 limit
-            VehicleType.VAN -> 0.9 + rng.nextDouble() * 0.18
+            VehicleType.CAR, VehicleType.SPORTS ->
+                if (rng.nextDouble() < 0.12) 1.02 + rng.nextDouble() * 0.06 else 0.88 + rng.nextDouble() * 0.13
+            VehicleType.VAN -> 0.88 + rng.nextDouble() * 0.12
             else -> 1.0
         }
         val color = when (type) {
             VehicleType.LORRY, VehicleType.COACH -> HEAVY_COLORS[rng.nextInt(HEAVY_COLORS.size)]
             VehicleType.VAN -> VAN_COLORS[rng.nextInt(VAN_COLORS.size)]
+            VehicleType.SPORTS -> SPORTS_COLORS[rng.nextInt(SPORTS_COLORS.size)]
             VehicleType.POLICE -> POLICE_COLOR
             VehicleType.RECOVERY -> RECOVERY_COLOR
             else -> CAR_COLORS[rng.nextInt(CAR_COLORS.size)]
@@ -1167,7 +1434,11 @@ class Simulation(seed: Long = System.nanoTime()) {
             politeness = 0.1 + rng.nextDouble() * 0.4,
             yieldsToMergers = rng.nextDouble() < 0.75,
             color = color,
-        ).also { it.nextDecisionTime = time + rng.nextDouble() }
+        ).also {
+            it.nextDecisionTime = time + rng.nextDouble()
+            // Rule 126: around a two-second gap, more for large vehicles.
+            it.headway = type.timeHeadway * (0.85 + rng.nextDouble() * 0.3)
+        }
     }
 
     // Declared last so that every property above is initialised first.
@@ -1180,14 +1451,16 @@ class Simulation(seed: Long = System.nanoTime()) {
         const val WINDOW = 900.0
         const val JUNCTION_RANGE = 2400.0
         const val START_S = 1200.0
-        const val PLAYER_TOP_SPEED = 62.0 // ≈ 139 mph
-        const val PLAYER_LANE_CHANGE_TIME = 1.3
+        const val SIGNAL_TIME = 1.5
+        const val CLOSURE_REACT = 1200.0
         const val LANE_CHANGE_COOLDOWN = 4.0
         const val SAFE_BRAKING = 4.0
         const val CHANGE_THRESHOLD = 0.15
         const val KEEP_LEFT_BIAS = 0.3
         const val CAMERA_GRACE_PERIOD = 10.0
         const val GIVE_WAY_SETBACK = 5.0
+        /** Vehicles on the hard shoulder stop this far before an entry slip joins, clear of its taper. */
+        const val HARD_SHOULDER_END_GAP = 25.0
 
         /** Above this speed (≈ 38 mph) vehicles must not pass slower traffic on its left. */
         val UNDERTAKE_SPEED = Units.mphToMs(38.0)
@@ -1203,6 +1476,7 @@ class Simulation(seed: Long = System.nanoTime()) {
             0xFF1F3A68.toInt(), 0xFFB3202A.toInt(), 0xFF2F6FB5.toInt(), 0xFF2E5E3A.toInt(),
             0xFF7A2E3A.toInt(), 0xFFD9D4C7.toInt(), 0xFF3C3F44.toInt(), 0xFFE07A22.toInt(),
         )
+        val SPORTS_COLORS = intArrayOf(0xFFC8102E.toInt(), 0xFF0B5FA5.toInt(), 0xFF101010.toInt(), 0xFFFFFFFF.toInt())
         val VAN_COLORS = intArrayOf(
             0xFFFFFFFF.toInt(), 0xFFE9E9E9.toInt(), 0xFF8A9199.toInt(), 0xFF1C4E8A.toInt(),
         )

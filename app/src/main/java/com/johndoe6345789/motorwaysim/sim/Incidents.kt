@@ -9,6 +9,14 @@ class Incident(val id: Int, val cw: Carriageway?, val crash: Boolean) {
     enum class Stage { WAITING_FOR_POLICE, POLICE_EN_ROUTE, POLICE_ON_SCENE, RECOVERY_EN_ROUTE, LOADING, CLEARING, DONE }
 
     val wrecks = ArrayList<Vehicle>()
+
+    /** A breakdown that made it onto the hard shoulder (Rule 277): no lanes need closing. */
+    var hardShoulder = false
+        internal set
+
+    /** Waiting for the player, driving a police car or recovery truck, to attend. */
+    var awaitingPlayer = false
+        internal set
     var police: Vehicle? = null
     var recovery: Vehicle? = null
     var stage = Stage.WAITING_FOR_POLICE
@@ -20,7 +28,7 @@ class Incident(val id: Int, val cw: Carriageway?, val crash: Boolean) {
     val closedLanes: Int
         get() {
             var mask = 0
-            for (w in wrecks) if (w.link is MotorwayLink) mask = mask or (1 shl blockedLane(w))
+            for (w in wrecks) if (w.link is MotorwayLink && w.lane >= 0) mask = mask or (1 shl w.lane)
             return mask
         }
 
@@ -35,8 +43,8 @@ class Incident(val id: Int, val cw: Carriageway?, val crash: Boolean) {
         get() = max(frontS, recovery?.takeIf { it.task?.arrived == true || it.rear > frontS }?.s ?: frontS)
 
     companion object {
-        /** A wreck in the extra lane at a junction blocks lane 1 as well. */
-        fun blockedLane(w: Vehicle) = max(0, w.lane)
+        /** The lane a wreck stands in (-1: the hard shoulder or a junction's extra lane). */
+        fun blockedLane(w: Vehicle) = w.lane
     }
 }
 
@@ -67,6 +75,19 @@ class Responders(private val sim: Simulation) {
             inc.wrecks += w
         }
         sim.incidents += inc
+        inc.hardShoulder = !crash && cw != null && inc.wrecks.all { it.lane == -1 }
+        val player = sim.player
+        if (inc.hardShoulder) {
+            // Off the running lanes: just the recovery truck is needed.
+            setStage(inc, Incident.Stage.POLICE_ON_SCENE)
+            sim.post("Breakdown on the hard shoulder ahead: recovery on its way. Give it room (Rule 264)")
+            return
+        }
+        if (!crash && cw != null && player.type == VehicleType.POLICE && !sim.crashed && !sim.autopilot) {
+            inc.awaitingPlayer = true
+            sim.post("Control: breakdown in ${laneText(inc.closedLanes)} ahead. Attend with blue lights and stop behind it", warning = true)
+            return
+        }
         if (!crash && cw != null) {
             // A traffic patrol is already on scene, protecting the broken-down vehicle.
             val link = sim.network.motorway.getValue(cw)
@@ -129,7 +150,20 @@ class Responders(private val sim: Simulation) {
         val cw = inc.cw!!
         val link = sim.network.motorway.getValue(cw)
         when (inc.stage) {
-            Incident.Stage.WAITING_FOR_POLICE -> if (inc.stageTime > POLICE_DELAY) {
+            Incident.Stage.WAITING_FOR_POLICE -> if (inc.awaitingPlayer) {
+                if (sim.autopilot || sim.crashed) {
+                    // The player has handed over: send a patrol instead.
+                    inc.awaitingPlayer = false
+                    inc.stageTime = 0.0
+                } else if (playerProtecting(inc, link)) {
+                    inc.awaitingPlayer = false
+                    sim.post("Scene protected. Recovery truck on its way")
+                    setStage(inc, Incident.Stage.POLICE_ON_SCENE)
+                } else if (inc.stageTime > PLAYER_TIMEOUT) {
+                    inc.awaitingPlayer = false
+                    inc.stageTime = 0.0
+                }
+            } else if (inc.stageTime > POLICE_DELAY) {
                 val rearmost = inc.wrecks.minByOrNull { it.rear } ?: return setStage(inc, Incident.Stage.CLEARING)
                 val police = dispatch(inc, link, VehicleType.POLICE) ?: return
                 police.task!!.apply {
@@ -152,12 +186,36 @@ class Responders(private val sim: Simulation) {
             }
             Incident.Stage.POLICE_ON_SCENE -> if (inc.stageTime > if (inc.crash) RECOVERY_DELAY else 1.0) {
                 val wreck = inc.wrecks.maxByOrNull { it.s } ?: return setStage(inc, Incident.Stage.CLEARING)
+                val p = sim.player
+                if (p.type == VehicleType.RECOVERY && !sim.crashed && !sim.autopilot && p.task == null && inc.stageTime < PLAYER_TIMEOUT) {
+                    // The player is the recovery truck: wait for them to pull in ahead of the casualty.
+                    if (!inc.awaitingPlayer) {
+                        inc.awaitingPlayer = true
+                        val where = if (wreck.lane < 0) "on the hard shoulder" else "in lane ${wreck.lane + 1}"
+                        sim.post("Recovery job: vehicle $where ahead. Pull in ahead of it and stop", warning = true)
+                    }
+                    if (playerReadyToRecover(wreck, link)) {
+                        inc.awaitingPlayer = false
+                        p.task = Task(inc).apply {
+                            target = wreck
+                            lane = wreck.lane
+                            stopS = p.s
+                            arrived = true
+                        }
+                        p.v = 0.0
+                        p.hazards = true
+                        inc.recovery = p
+                        setStage(inc, Incident.Stage.LOADING)
+                    }
+                    return
+                }
+                inc.awaitingPlayer = false
                 val truck = dispatch(inc, link, VehicleType.RECOVERY) ?: return
                 val lane = Incident.blockedLane(wreck)
                 truck.task!!.apply {
                     target = wreck
                     this.lane = lane
-                    approachLane = pickApproachLane(inc, lane)
+                    approachLane = pickApproachLane(inc, lane, truck)
                     stopS = wreck.s + RECOVERY_PULL_IN + truck.length
                 }
                 inc.recovery = truck
@@ -171,9 +229,15 @@ class Responders(private val sim: Simulation) {
                 if (inc.stageTime > ARRIVAL_TIMEOUT) teleport(truck, link, t.lane, t.stopS)
                 // Having crawled past the scene, pull into the closed lane ahead of the wreck.
                 if (truck.lane == t.approachLane && !truck.isChangingLane && truck.rear > wreck.s + 3) {
-                    truck.startLaneChange(t.lane, sim.time, 2.2)
+                    truck.indicator = if (t.lane > truck.lane) 1 else -1
+                    // Only once nobody is alongside or just behind in that lane (e.g. traffic using an exit lane).
+                    val behind = sim.followerIn(link, t.lane, truck)
+                    val ahead = sim.nearestAhead(link, t.lane, truck.rear, truck, 40.0)
+                    if ((behind == null || truck.rear - behind.s > 4 + behind.v) && (ahead == null || ahead.rear - truck.s > 3)) {
+                        truck.startLaneChange(t.lane, sim.time, 2.2)
+                    }
                 }
-                if (truck.lane == t.lane && !truck.isChangingLane && abs(truck.s - t.stopS) < 6 && truck.v < 0.8) {
+                if (truck.lane == t.lane && !truck.isChangingLane && truck.s > t.stopS - 6 && truck.v < 0.8) {
                     t.arrived = true
                     truck.v = 0.0
                     truck.hazards = true
@@ -185,6 +249,7 @@ class Responders(private val sim: Simulation) {
                 val wreck = truck.task!!.target!!
                 // Reverse up to the wreck, then winch it aboard.
                 val parkS = wreck.s + RECOVERY_BACK_GAP + truck.length
+                if (truck.free) truck.lat += (wreck.lane - truck.lat) * min(1.0, dt * 1.5) // line up with the casualty
                 if (truck.s > parkS + 0.05) {
                     // Only reverse when nobody else is in the way.
                     val behind = sim.followerIn(link, truck.lane, truck)
@@ -203,7 +268,11 @@ class Responders(private val sim: Simulation) {
                 truck.task = null
                 truck.hazards = false
                 inc.recovery = null
-                sim.post("Recovery truck has cleared lane ${Incident.blockedLane(wreck) + 1}")
+                val where = if (wreck.lane < 0) "the hard shoulder" else "lane ${wreck.lane + 1}"
+                if (truck.isPlayer) {
+                    sim.jobsDone++
+                    sim.post("Job done: the vehicle is on your flatbed. Build up speed, signal and rejoin (Rule 278)")
+                } else sim.post("Recovery truck has cleared $where")
                 if (wreck.isPlayer) sim.continueAfterCrash()
                 setStage(inc, if (inc.wrecks.isEmpty()) Incident.Stage.CLEARING else Incident.Stage.POLICE_ON_SCENE)
             }
@@ -253,9 +322,32 @@ class Responders(private val sim: Simulation) {
         c.task = Task(inc)
     }
 
-    private fun pickApproachLane(inc: Incident, lane: Int): Int {
+    /** The player's police car is stopped behind the incident, in its lane, with blue lights on. */
+    private fun playerProtecting(inc: Incident, link: MotorwayLink): Boolean {
+        val p = sim.player
+        if (p.link !== link || p.v > 0.6) return false
+        val rearmost = inc.wrecks.minByOrNull { it.rear } ?: return false
+        if (!p.occupies(rearmost.lane) || p.s > rearmost.rear - 1 || p.s < rearmost.rear - 60) return false
+        if (p.beacon != Beacon.BLUE) {
+            if ((inc.stageTime * 10).toInt() % 80 == 0) sim.post("Switch on your blue lights to protect the scene", warning = true)
+            return false
+        }
+        return true
+    }
+
+    /** The player's recovery truck is stopped ahead of the casualty vehicle, in its lane. */
+    private fun playerReadyToRecover(wreck: Vehicle, link: MotorwayLink): Boolean {
+        val p = sim.player
+        if (p.link !== link || p.v > 0.6) return false
+        val inLane = if (wreck.lane < 0) p.lat < -0.3 else p.occupies(wreck.lane)
+        return inLane && p.rear > wreck.s + 0.5 && p.rear < wreck.s + 45
+    }
+
+    /** An open lane next to (or near) the casualty's lane that [truck] may use (Rule 265). */
+    private fun pickApproachLane(inc: Incident, lane: Int, truck: Vehicle): Int {
+        if (lane < 0) return 0
         val candidates = listOf(lane + 1, lane - 1, lane + 2, lane - 2)
-        return candidates.firstOrNull { it in 0 until Road.LANES && !inc.isClosed(it) } ?: lane
+        return candidates.firstOrNull { it in 0 until Road.LANES && !inc.isClosed(it) && truck.canUseLane(it) } ?: lane
     }
 
     private fun teleport(v: Vehicle, link: MotorwayLink, lane: Int, s: Double) {
@@ -340,18 +432,20 @@ class Responders(private val sim: Simulation) {
             val w = t.target ?: return null
             if (c.rear <= w.s) return null
         }
-        return t.stopS
+        // Having overshot, stop as soon as is comfortable; the truck reverses back to the casualty anyway.
+        return max(t.stopS, c.s + c.v * c.v / 3.0 + 1.0)
     }
 
     /** True while the incident logic moves this vehicle itself (a truck reversing or loading). */
     fun controlsPosition(c: Vehicle): Boolean =
-        c.role == Role.RECOVERY && c.task?.arrived == true
+        c.type == VehicleType.RECOVERY && c.task?.arrived == true
 
     companion object {
         const val POLICE_DELAY = 5.0
         const val RECOVERY_DELAY = 6.0
         const val POLICE_LEAVE_DELAY = 8.0
         const val ARRIVAL_TIMEOUT = 150.0
+        const val PLAYER_TIMEOUT = 180.0
         const val LOCAL_CLEAR_TIME = 30.0
         const val POLICE_GAP = 18.0
         const val RECOVERY_PULL_IN = 26.0

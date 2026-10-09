@@ -85,6 +85,21 @@ class MeshBuilder(capacity: Int = 4096) {
         if (bottom) quad(x0, y1, z0, x1, y1, z0, x1, y0, z0, x0, y0, z0)
     }
 
+    /**
+     * A tapered box: bottom rectangle [x0, x1] × [y0, y1] at [z0], top rectangle
+     * [tx0, tx1] × [ty0, ty1] at [z1]. Used for sloped windscreens, bonnets and cabs.
+     */
+    fun frustum(
+        x0: Double, x1: Double, y0: Double, y1: Double, z0: Double,
+        tx0: Double, tx1: Double, ty0: Double, ty1: Double, z1: Double,
+    ) {
+        quad(tx0, ty0, z1, tx1, ty0, z1, tx1, ty1, z1, tx0, ty1, z1) // top
+        quad(x0, y0, z0, x1, y0, z0, tx1, ty0, z1, tx0, ty0, z1) // rear
+        quad(x1, y1, z0, x0, y1, z0, tx0, ty1, z1, tx1, ty1, z1) // front
+        quad(x0, y1, z0, x0, y0, z0, tx0, ty0, z1, tx0, ty1, z1) // left
+        quad(x1, y0, z0, x1, y1, z0, tx1, ty1, z1, tx1, ty0, z1) // right
+    }
+
     /** A box centred on (cx, cy) with its length along [heading] (radians from east). */
     fun orientedBox(cx: Double, cy: Double, z0: Double, z1: Double, length: Double, width: Double, heading: Double) {
         val fx = cos(heading) * length / 2

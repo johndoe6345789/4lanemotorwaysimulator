@@ -5,12 +5,15 @@ import com.johndoe6345789.motorwaysim.sim.VehicleType
 /** How a model part is coloured. */
 enum class Tint { BODY, TRAILER, FIXED }
 
+/** One mesh of a model, with how it is tinted and how glossy it is. */
+class Part(val mesh: Mesh, val tint: Tint, val shine: Float)
+
 /**
  * A low-poly vehicle model in local coordinates: x to the right, y forwards and z up,
  * with the origin at the centre of the footprint on the ground.
  */
 class VehicleModel(
-    val parts: List<Pair<Mesh, Tint>>,
+    val parts: List<Part>,
     val front: Double,
     val rear: Double,
     /** Lateral position of the lamp clusters. */
@@ -25,14 +28,16 @@ class VehicleModel(
 )
 
 object VehicleModels {
-    private val GLASS = 0xFF18222E.toInt()
-    private val TRIM = 0xFF2A2C30.toInt()
-    private val TYRE = 0xFF131313.toInt()
+    private val GLASS = 0xFF16202B.toInt()
+    private val TRIM = 0xFF24262A.toInt()
+    private val TYRE = 0xFF111111.toInt()
+    private val RIM = 0xFFB9BEC4.toInt()
     private val HEADLAMP = 0xFFFFF4D6.toInt()
     private val TAIL = 0xFF8E1010.toInt()
-    private val SHADOW = 0xFF1E2023.toInt()
+    private val SHADOW = 0xFF1A1C1F.toInt()
     private val CHASSIS = 0xFF26282B.toInt()
     private val BED = 0xFF4A4E54.toInt()
+    private val GRILLE = 0xFF0E0F11.toInt()
     private val POLICE_YELLOW = 0xFFF6D20F.toInt()
     private val POLICE_BLUE = 0xFF1C4FB8.toInt()
 
@@ -40,6 +45,7 @@ object VehicleModels {
 
     private fun build(type: VehicleType): VehicleModel = when (type) {
         VehicleType.CAR -> car()
+        VehicleType.SPORTS -> sports()
         VehicleType.VAN -> van()
         VehicleType.LORRY -> lorry()
         VehicleType.COACH -> coach()
@@ -49,158 +55,207 @@ object VehicleModels {
 
     private fun lamps(m: MeshBuilder, front: Double, rear: Double, x: Double, headZ: Double, tailZ: Double) {
         m.color(HEADLAMP, 0.85f)
-        m.box(-x - 0.18, -x + 0.18, front - 0.03, front + 0.03, headZ - 0.07, headZ + 0.07)
-        m.box(x - 0.18, x + 0.18, front - 0.03, front + 0.03, headZ - 0.07, headZ + 0.07)
-        m.color(TAIL, 0.4f)
-        m.box(-x - 0.16, -x + 0.16, rear - 0.03, rear + 0.03, tailZ - 0.08, tailZ + 0.08)
-        m.box(x - 0.16, x + 0.16, rear - 0.03, rear + 0.03, tailZ - 0.08, tailZ + 0.08)
+        m.box(-x - 0.2, -x + 0.18, front - 0.04, front + 0.03, headZ - 0.07, headZ + 0.08)
+        m.box(x - 0.18, x + 0.2, front - 0.04, front + 0.03, headZ - 0.07, headZ + 0.08)
+        m.color(TAIL, 0.45f)
+        m.box(-x - 0.18, -x + 0.18, rear - 0.03, rear + 0.04, tailZ - 0.08, tailZ + 0.09)
+        m.box(x - 0.18, x + 0.18, rear - 0.03, rear + 0.04, tailZ - 0.08, tailZ + 0.09)
     }
 
     private fun shadow(m: MeshBuilder, hw: Double, front: Double, rear: Double) {
         m.color(SHADOW)
-        m.flat(-hw - 0.15, rear - 0.2, hw + 0.15, front + 0.2, 0.02)
+        m.flat(-hw - 0.1, rear - 0.1, hw + 0.1, front + 0.1, 0.03)
+    }
+
+    /** Tyres with alloy rims. */
+    private fun wheels(m: MeshBuilder, ys: DoubleArray, x: Double, r: Double, hw: Double) {
+        for (y in ys) for (side in doubleArrayOf(-1.0, 1.0)) {
+            m.color(TYRE)
+            m.wheel(side * x, y, r, r, hw)
+            m.color(RIM)
+            m.wheel(side * (x + hw + 0.012), y, r, r * 0.62, 0.012, 8)
+        }
+    }
+
+    private fun parts(body: MeshBuilder, detail: MeshBuilder, extra: MeshBuilder? = null) = buildList {
+        add(Part(body.build(), Tint.BODY, 0.9f))
+        if (extra != null) add(Part(extra.build(), Tint.TRAILER, 0.25f))
+        add(Part(detail.build(), Tint.FIXED, 0.5f))
     }
 
     private fun car(): VehicleModel {
         val body = MeshBuilder()
-        body.box(-0.9, 0.9, -2.25, 2.25, 0.3, 0.78)
-        body.box(-0.86, 0.86, -2.2, 1.0, 0.78, 0.86)
-        body.box(-0.72, 0.72, -1.2, 0.8, 1.36, 1.45)
-        body.box(-1.04, -0.9, 0.95, 1.12, 0.85, 0.98)
-        body.box(0.9, 1.04, 0.95, 1.12, 0.85, 0.98)
-        val detail = MeshBuilder()
-        shadow(detail, 0.9, 2.25, -2.25)
-        detail.color(GLASS)
-        detail.box(-0.78, 0.78, -1.3, 0.95, 0.86, 1.36)
-        detail.color(TRIM)
-        detail.box(-0.92, 0.92, 2.12, 2.3, 0.28, 0.5)
-        detail.box(-0.92, 0.92, -2.3, -2.12, 0.28, 0.5)
-        lamps(detail, 2.25, -2.25, 0.62, 0.62, 0.7)
-        detail.color(TYRE)
-        for (y in doubleArrayOf(-1.4, 1.4)) for (x in doubleArrayOf(-0.78, 0.78)) detail.wheel(x, y, 0.32, 0.32, 0.11)
-        return VehicleModel(listOf(body.build() to Tint.BODY, detail.build() to Tint.FIXED), 2.25, -2.25, 0.62, 0.62, 0.7)
+        // Lower body with rounded-off ends, then bonnet and boot, and the roof.
+        body.frustum(-0.9, 0.9, -2.25, 2.25, 0.3, -0.88, 0.88, -2.15, 2.1, 0.72)
+        body.frustum(-0.88, 0.88, -2.15, 2.1, 0.72, -0.84, 0.84, -2.05, 1.95, 0.84)
+        body.frustum(-0.69, 0.69, -1.08, 0.5, 1.36, -0.66, 0.66, -1.0, 0.42, 1.43)
+        body.box(-1.03, -0.88, 0.75, 0.92, 0.86, 0.98)
+        body.box(0.88, 1.03, 0.75, 0.92, 0.86, 0.98)
+        val d = MeshBuilder()
+        shadow(d, 0.9, 2.25, -2.25)
+        d.color(GLASS)
+        // Raked windscreen and rear window.
+        d.frustum(-0.82, 0.82, -1.6, 1.1, 0.84, -0.69, 0.69, -1.08, 0.5, 1.36)
+        d.color(TRIM)
+        d.box(-0.92, 0.92, 2.12, 2.3, 0.28, 0.5)
+        d.box(-0.92, 0.92, -2.3, -2.12, 0.28, 0.5)
+        d.color(GRILLE)
+        d.box(-0.45, 0.45, 2.2, 2.27, 0.48, 0.66)
+        lamps(d, 2.25, -2.25, 0.62, 0.62, 0.7)
+        wheels(d, doubleArrayOf(-1.38, 1.38), 0.8, 0.32, 0.11)
+        return VehicleModel(parts(body, d), 2.25, -2.25, 0.62, 0.62, 0.7)
+    }
+
+    private fun sports(): VehicleModel {
+        val body = MeshBuilder()
+        body.frustum(-0.95, 0.95, -2.2, 2.2, 0.22, -0.93, 0.93, -2.1, 2.05, 0.62)
+        body.frustum(-0.93, 0.93, -2.1, 2.05, 0.62, -0.85, 0.85, -1.95, 1.6, 0.72)
+        body.frustum(-0.66, 0.66, -0.95, 0.15, 1.16, -0.62, 0.62, -0.85, 0.05, 1.22)
+        body.box(-0.8, 0.8, -2.15, -1.95, 0.95, 1.0) // rear spoiler
+        val d = MeshBuilder()
+        shadow(d, 0.95, 2.2, -2.2)
+        d.color(GLASS)
+        d.frustum(-0.84, 0.84, -1.75, 1.25, 0.72, -0.66, 0.66, -0.95, 0.15, 1.16)
+        d.color(TRIM)
+        d.box(-0.12, 0.12, -2.05, -1.95, 0.72, 0.95)
+        d.box(-0.9, 0.9, 2.08, 2.25, 0.2, 0.4)
+        d.color(GRILLE)
+        d.box(-0.6, 0.6, 2.15, 2.22, 0.28, 0.42)
+        lamps(d, 2.2, -2.2, 0.68, 0.52, 0.6)
+        wheels(d, doubleArrayOf(-1.35, 1.35), 0.83, 0.33, 0.14)
+        return VehicleModel(parts(body, d), 2.2, -2.2, 0.68, 0.52, 0.6)
     }
 
     private fun van(): VehicleModel {
         val body = MeshBuilder()
-        body.box(-1.0, 1.0, -2.8, 2.15, 0.35, 2.35)
-        body.box(-1.0, 1.0, 2.15, 2.8, 0.35, 1.25)
-        body.box(-0.98, 0.98, 2.15, 2.4, 1.25, 1.35)
-        val detail = MeshBuilder()
-        shadow(detail, 1.0, 2.8, -2.8)
-        detail.color(GLASS)
-        detail.quad(-0.92, 2.42, 1.3, 0.92, 2.42, 1.3, 0.92, 2.17, 2.2, -0.92, 2.17, 2.2)
-        detail.box(-1.01, 1.01, 1.4, 2.12, 1.35, 2.05)
-        detail.color(TRIM)
-        detail.box(-1.02, 1.02, 2.7, 2.85, 0.32, 0.6)
-        detail.box(-1.02, 1.02, -2.85, -2.7, 0.32, 0.6)
-        lamps(detail, 2.8, -2.8, 0.72, 0.8, 0.9)
-        detail.color(TYRE)
-        for (y in doubleArrayOf(-1.9, 1.85)) for (x in doubleArrayOf(-0.86, 0.86)) detail.wheel(x, y, 0.36, 0.36, 0.13)
-        return VehicleModel(listOf(body.build() to Tint.BODY, detail.build() to Tint.FIXED), 2.8, -2.8, 0.72, 0.8, 0.9)
+        body.box(-1.0, 1.0, -2.8, 1.75, 0.35, 2.35)
+        body.frustum(-1.0, 1.0, 1.75, 2.8, 0.35, -0.98, 0.98, 1.75, 2.62, 1.2)
+        body.frustum(-0.98, 0.98, 1.75, 2.62, 1.2, -0.97, 0.97, 1.75, 2.0, 2.33)
+        val d = MeshBuilder()
+        shadow(d, 1.0, 2.8, -2.8)
+        d.color(GLASS)
+        d.quad(-0.9, 2.6, 1.24, 0.9, 2.6, 1.24, 0.9, 2.01, 2.27, -0.9, 2.01, 2.27)
+        d.box(-1.01, 1.01, 1.1, 1.95, 1.35, 2.05)
+        d.color(TRIM)
+        d.box(-1.02, 1.02, 2.7, 2.86, 0.32, 0.6)
+        d.box(-1.02, 1.02, -2.86, -2.7, 0.32, 0.6)
+        d.color(GRILLE)
+        d.box(-0.6, 0.6, 2.78, 2.84, 0.62, 0.95)
+        lamps(d, 2.8, -2.8, 0.72, 0.85, 0.95)
+        wheels(d, doubleArrayOf(-1.9, 1.85), 0.86, 0.36, 0.13)
+        return VehicleModel(parts(body, d), 2.8, -2.8, 0.72, 0.85, 0.95)
     }
 
     private fun lorry(): VehicleModel {
         val cab = MeshBuilder()
-        cab.box(-1.25, 1.25, 5.9, 8.25, 0.75, 3.35)
-        cab.box(-1.2, 1.2, 6.2, 8.0, 3.35, 3.6)
+        cab.frustum(-1.25, 1.25, 5.9, 8.25, 0.75, -1.22, 1.22, 5.9, 8.1, 3.35)
+        cab.frustum(-1.22, 1.22, 6.1, 8.0, 3.35, -1.15, 1.15, 6.3, 7.7, 3.75) // aerodynamic roof
         val trailer = MeshBuilder()
         trailer.box(-1.27, 1.27, -8.25, 5.65, 1.2, 3.95)
-        val detail = MeshBuilder()
-        shadow(detail, 1.27, 8.25, -8.25)
-        detail.color(GLASS)
-        detail.box(-1.15, 1.15, 8.24, 8.3, 2.0, 3.05)
-        detail.box(-1.26, 1.26, 7.2, 8.1, 2.1, 2.95)
-        detail.color(CHASSIS)
-        detail.box(-0.95, 0.95, -8.0, 8.0, 0.55, 1.2)
-        detail.color(TRIM)
-        detail.box(-1.27, 1.27, 8.2, 8.35, 0.5, 0.95)
-        lamps(detail, 8.32, -8.27, 0.95, 0.9, 1.0)
-        detail.color(TYRE)
-        for (y in doubleArrayOf(7.3, 5.9, -5.4, -6.7, -8.0 + 0.6)) for (x in doubleArrayOf(-1.0, 1.0)) {
-            detail.wheel(x, y, 0.5, 0.5, 0.17)
-        }
-        return VehicleModel(
-            listOf(cab.build() to Tint.BODY, trailer.build() to Tint.TRAILER, detail.build() to Tint.FIXED),
-            8.25, -8.25, 0.95, 0.9, 1.0,
-        )
+        val d = MeshBuilder()
+        shadow(d, 1.27, 8.25, -8.25)
+        d.color(GLASS)
+        d.quad(-1.13, 8.2, 2.0, 1.13, 8.2, 2.0, 1.13, 8.13, 3.1, -1.13, 8.13, 3.1)
+        d.box(-1.26, 1.26, 7.1, 8.0, 2.1, 2.95)
+        d.color(CHASSIS)
+        d.box(-0.95, 0.95, -8.0, 8.0, 0.55, 1.2)
+        d.box(-1.24, -1.18, -4.5, 3.5, 0.55, 1.15) // side skirts
+        d.box(1.18, 1.24, -4.5, 3.5, 0.55, 1.15)
+        d.color(TRIM)
+        d.box(-1.27, 1.27, 8.2, 8.35, 0.5, 0.95)
+        d.color(GRILLE)
+        d.box(-0.9, 0.9, 8.24, 8.3, 1.0, 1.9)
+        lamps(d, 8.32, -8.27, 0.95, 0.85, 1.0)
+        wheels(d, doubleArrayOf(7.3, 5.9, -5.4, -6.7, -7.4), 1.0, 0.5, 0.17)
+        return VehicleModel(parts(cab, d, trailer), 8.25, -8.25, 0.95, 0.85, 1.0)
     }
 
     private fun coach(): VehicleModel {
         val body = MeshBuilder()
-        body.box(-1.27, 1.27, -6.25, 6.25, 0.35, 3.45)
-        val detail = MeshBuilder()
-        shadow(detail, 1.27, 6.25, -6.25)
-        detail.color(GLASS)
-        detail.box(-1.29, 1.29, -5.6, 5.7, 1.55, 2.9)
-        detail.box(-1.2, 1.2, 6.2, 6.3, 0.95, 3.1)
-        detail.color(TRIM)
-        detail.box(-1.28, 1.28, 6.2, 6.33, 0.35, 0.75)
-        detail.box(-0.7, 0.7, -2.0, 1.5, 3.45, 3.7)
-        lamps(detail, 6.3, -6.28, 0.95, 0.75, 1.0)
-        detail.color(TYRE)
-        for (y in doubleArrayOf(4.4, -3.4)) for (x in doubleArrayOf(-1.02, 1.02)) detail.wheel(x, y, 0.5, 0.5, 0.17)
-        return VehicleModel(listOf(body.build() to Tint.BODY, detail.build() to Tint.FIXED), 6.25, -6.25, 0.95, 0.75, 1.0)
+        body.frustum(-1.27, 1.27, -6.25, 6.25, 0.35, -1.25, 1.25, -6.2, 6.1, 3.4)
+        body.frustum(-1.25, 1.25, -6.2, 6.1, 3.4, -1.18, 1.18, -6.0, 5.8, 3.5)
+        val d = MeshBuilder()
+        shadow(d, 1.27, 6.25, -6.25)
+        d.color(GLASS)
+        d.box(-1.28, 1.28, -5.6, 5.6, 1.55, 2.9)
+        d.quad(-1.18, 6.27, 1.0, 1.18, 6.27, 1.0, 1.15, 6.12, 3.2, -1.15, 6.12, 3.2)
+        d.color(TRIM)
+        d.box(-1.28, 1.28, 6.2, 6.33, 0.35, 0.75)
+        d.box(-0.7, 0.7, -2.0, 1.5, 3.5, 3.72)
+        lamps(d, 6.3, -6.28, 0.95, 0.75, 1.0)
+        wheels(d, doubleArrayOf(4.4, -3.4, -4.6), 1.02, 0.5, 0.17)
+        return VehicleModel(parts(body, d), 6.25, -6.25, 0.95, 0.75, 1.0)
     }
 
     private fun police(): VehicleModel {
         val body = MeshBuilder()
-        body.box(-0.92, 0.92, -2.45, 2.45, 0.3, 0.82)
-        body.box(-0.88, 0.88, -2.4, 1.1, 0.82, 0.9)
-        body.box(-0.76, 0.76, -2.15, 0.85, 1.44, 1.52)
-        val detail = MeshBuilder()
-        shadow(detail, 0.92, 2.45, -2.45)
-        detail.color(GLASS)
-        detail.box(-0.8, 0.8, -2.2, 0.95, 0.9, 1.44)
+        body.frustum(-0.92, 0.92, -2.45, 2.45, 0.3, -0.9, 0.9, -2.4, 2.3, 0.8)
+        body.frustum(-0.9, 0.9, -2.4, 2.3, 0.8, -0.86, 0.86, -2.35, 2.15, 0.9)
+        body.frustum(-0.76, 0.76, -2.2, 0.75, 1.44, -0.74, 0.74, -2.15, 0.65, 1.52)
+        val d = MeshBuilder()
+        shadow(d, 0.92, 2.45, -2.45)
+        d.color(GLASS)
+        d.frustum(-0.84, 0.84, -2.3, 1.35, 0.9, -0.76, 0.76, -2.2, 0.75, 1.44)
         // Battenburg livery: alternating yellow and blue blocks along both sides.
         for (i in 0 until 8) {
-            detail.color(if (i % 2 == 0) POLICE_YELLOW else POLICE_BLUE)
+            d.color(if (i % 2 == 0) POLICE_YELLOW else POLICE_BLUE)
             val y0 = -2.4 + i * 0.6
             val y1 = y0 + 0.6
-            detail.box(-0.94, -0.92, y0, y1, 0.4, 0.78)
-            detail.box(0.92, 0.94, y0, y1, 0.4, 0.78)
+            d.box(-0.935, -0.91, y0, y1, 0.42, 0.76)
+            d.box(0.91, 0.935, y0, y1, 0.42, 0.76)
         }
-        detail.color(POLICE_YELLOW)
-        detail.box(-0.86, 0.86, 1.6, 2.4, 0.83, 0.86)
-        detail.color(TRIM)
-        detail.box(-0.94, 0.94, 2.35, 2.5, 0.28, 0.5)
-        detail.box(-0.94, 0.94, -2.5, -2.35, 0.28, 0.5)
-        detail.box(-0.62, 0.62, -0.25, 0.15, 1.52, 1.64)
-        lamps(detail, 2.45, -2.45, 0.64, 0.64, 0.72)
-        detail.color(TYRE)
-        for (y in doubleArrayOf(-1.5, 1.5)) for (x in doubleArrayOf(-0.8, 0.8)) detail.wheel(x, y, 0.33, 0.33, 0.11)
+        d.color(POLICE_YELLOW)
+        d.box(-0.8, 0.8, 1.6, 2.2, 0.86, 0.9)
+        d.color(TRIM)
+        d.box(-0.94, 0.94, 2.35, 2.5, 0.28, 0.5)
+        d.box(-0.94, 0.94, -2.5, -2.35, 0.28, 0.5)
+        d.box(-0.62, 0.62, -0.25, 0.15, 1.52, 1.64)
+        lamps(d, 2.45, -2.45, 0.64, 0.64, 0.72)
+        wheels(d, doubleArrayOf(-1.5, 1.5), 0.82, 0.33, 0.11)
         return VehicleModel(
-            listOf(body.build() to Tint.BODY, detail.build() to Tint.FIXED), 2.45, -2.45, 0.64, 0.64, 0.72,
+            parts(body, d), 2.45, -2.45, 0.64, 0.64, 0.72,
             beacons = listOf(doubleArrayOf(-0.45, -0.05, 1.68), doubleArrayOf(0.45, -0.05, 1.68)),
         )
     }
 
     private fun recovery(): VehicleModel {
         val cab = MeshBuilder()
-        cab.box(-1.25, 1.25, 2.3, 4.3, 0.6, 2.95)
-        val detail = MeshBuilder()
-        shadow(detail, 1.25, 4.3, -4.3)
-        detail.color(GLASS)
-        detail.box(-1.15, 1.15, 4.26, 4.34, 1.75, 2.75)
-        detail.box(-1.26, 1.26, 3.3, 4.2, 1.8, 2.7)
-        detail.color(BED)
-        detail.box(-1.25, 1.25, -4.3, 2.15, 0.95, 1.15)
-        detail.box(-1.25, -1.15, -4.3, 2.15, 1.15, 1.35)
-        detail.box(1.15, 1.25, -4.3, 2.15, 1.15, 1.35)
-        detail.box(-1.2, 1.2, 1.9, 2.2, 1.15, 2.4)
-        detail.color(CHASSIS)
-        detail.box(-0.9, 0.9, -4.0, 4.0, 0.5, 0.95)
-        detail.color(TRIM)
-        detail.box(-0.85, 0.85, 2.95, 3.25, 2.95, 3.08)
-        detail.box(-1.26, 1.26, 4.25, 4.4, 0.45, 0.85)
-        lamps(detail, 4.35, -4.32, 0.9, 0.8, 0.9)
-        detail.color(TYRE)
-        for (y in doubleArrayOf(3.4, -2.4, -3.5)) for (x in doubleArrayOf(-1.0, 1.0)) detail.wheel(x, y, 0.48, 0.48, 0.16)
+        cab.frustum(-1.25, 1.25, 2.3, 4.3, 0.6, -1.22, 1.22, 2.3, 4.05, 2.95)
+        val d = MeshBuilder()
+        shadow(d, 1.25, 4.3, -4.3)
+        d.color(GLASS)
+        d.quad(-1.13, 4.28, 1.75, 1.13, 4.28, 1.75, 1.13, 4.1, 2.75, -1.13, 4.1, 2.75)
+        d.box(-1.26, 1.26, 3.2, 4.0, 1.8, 2.7)
+        d.color(BED)
+        d.box(-1.25, 1.25, -4.3, 2.15, 0.95, 1.15)
+        d.box(-1.25, -1.15, -4.3, 2.15, 1.15, 1.35)
+        d.box(1.15, 1.25, -4.3, 2.15, 1.15, 1.35)
+        d.box(-1.2, 1.2, 1.9, 2.2, 1.15, 2.4)
+        d.color(CHASSIS)
+        d.box(-0.9, 0.9, -4.0, 4.0, 0.5, 0.95)
+        d.color(TRIM)
+        d.box(-0.85, 0.85, 2.95, 3.25, 2.95, 3.08)
+        d.box(-1.26, 1.26, 4.25, 4.4, 0.45, 0.85)
+        lamps(d, 4.35, -4.32, 0.9, 0.8, 0.9)
+        wheels(d, doubleArrayOf(3.4, -2.4, -3.5), 1.0, 0.48, 0.16)
         return VehicleModel(
-            listOf(cab.build() to Tint.BODY, detail.build() to Tint.FIXED), 4.3, -4.3, 0.9, 0.8, 0.9,
+            parts(cab, d), 4.3, -4.3, 0.9, 0.8, 0.9,
             beacons = listOf(doubleArrayOf(-0.62, 3.1, 3.12), doubleArrayOf(0.62, 3.1, 3.12)),
             bedZ = 1.15, bedY = -1.1,
         )
+    }
+
+    /** A person standing, facing +y: for drivers waiting behind the barrier after a breakdown. */
+    val person: Mesh by lazy {
+        val m = MeshBuilder()
+        m.color(0xFF2B2F3A.toInt())
+        m.box(-0.18, -0.03, -0.1, 0.1, 0.0, 0.85)
+        m.box(0.03, 0.18, -0.1, 0.1, 0.0, 0.85)
+        m.color(0xFFF2D21B.toInt()) // hi-vis jacket
+        m.box(-0.24, 0.24, -0.13, 0.13, 0.85, 1.48)
+        m.color(0xFFD9A782.toInt())
+        m.box(-0.1, 0.1, -0.1, 0.1, 1.5, 1.74)
+        m.build()
     }
 
     private val TRAILER_COLORS = intArrayOf(0xFFEDEDED.toInt(), 0xFFDDE0E4.toInt(), 0xFFC9CED4.toInt())
