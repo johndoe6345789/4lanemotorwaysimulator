@@ -1,12 +1,17 @@
 package com.johndoe6345789.motorwaysim.sim
 
+import kotlin.math.PI
+import kotlin.math.floor
+import kotlin.math.round
+
 /**
- * Geometry and rules of a UK-style four-lane motorway carriageway.
+ * Geometry and rules of a UK-style dual four-lane motorway.
  *
- * Lanes are indexed 0..3 from left to right: lane index 0 is "lane 1" (the
- * nearside lane next to the hard shoulder) and index 3 is "lane 4" (the
- * offside/overtaking lane next to the central reservation). Traffic drives on
- * the left, so overtaking happens to the right (higher lane index).
+ * On each carriageway lanes are indexed from the nearside: lane index 0 is
+ * "lane 1" next to the hard shoulder and index 3 is "lane 4" next to the
+ * central reservation. Lane index -1 is the extra lane that exists only at
+ * junctions: the diverge lane leading to an exit and the acceleration lane
+ * from an entry slip road. Traffic drives on the left.
  */
 object Road {
     const val LANES = 4
@@ -14,22 +19,88 @@ object Road {
     const val HARD_SHOULDER = 3.3
     const val OFFSIDE_STRIP = 1.0
 
-    /** Total paved width from the outer edge of the hard shoulder to the central reservation. */
+    /** Paved width of one carriageway from the outer edge of the hard shoulder to the central reservation. */
     const val WIDTH = HARD_SHOULDER + LANES * LANE_WIDTH + OFFSIDE_STRIP
 
-    /** Distance between overhead smart-motorway gantries. */
-    const val GANTRY_SPACING = 1000.0
+    /** Half the width of the central reservation. */
+    const val CR_HALF = 1.5
 
-    /** The national speed limit for cars on a motorway. */
+    const val GANTRY_SPACING = 1000.0
     const val NATIONAL_LIMIT_MPH = 70
 
     /** Lorries over 7.5 t may not use the outside lane of a motorway with three or more lanes. */
     const val LORRY_BANNED_LANE = LANES - 1
 
-    /** Lateral centre of a (possibly fractional) lane, measured from the left edge of the hard shoulder. */
+    // Junctions: one every JUNCTION_SPACING metres. Offsets are relative to the junction
+    // centre, measured along each carriageway in its direction of travel.
+    const val JUNCTION_SPACING = 3000.0
+    const val DIVERGE_START = -900.0
+    const val DIVERGE_END = -650.0
+    const val MERGE_START = 500.0
+    const val MERGE_END = 720.0
+    const val FIRST_JUNCTION_NUMBER = 20
+
+    // Elevated roundabout over the motorway.
+    const val RING_RADIUS = 52.0
+    const val RING_HEIGHT = 7.0
+    const val RING_WIDTH = 7.5
+    const val RING_SPEED_MPH = 30
+    const val SLIP_WIDTH = 4.5
+    const val LOCAL_LENGTH = 650.0
+    const val LOCAL_OFFSET = 2.0
+    const val LOCAL_LIMIT_MPH = 40
+
+    /** Lateral centre of a (possibly fractional) lane, measured from the outer edge of the hard shoulder. */
     fun laneCenter(lane: Double): Double = HARD_SHOULDER + LANE_WIDTH * (lane + 0.5)
 
-    fun gantryIndexAt(s: Double): Long = Math.floorDiv(s.toLong(), GANTRY_SPACING.toLong())
+    fun gantryIndexAt(s: Double): Long = floor(s / GANTRY_SPACING).toLong()
+
+    /** No gantry stands under the roundabout at a junction centre. */
+    fun hasGantry(index: Long): Boolean = Math.floorMod(index, (JUNCTION_SPACING / GANTRY_SPACING).toLong()) != 0L
+
+    /** Index of the junction whose centre is nearest to world y. */
+    fun junctionNearest(y: Double): Int = round(y / JUNCTION_SPACING).toInt()
+
+    fun junctionY(k: Int): Double = k * JUNCTION_SPACING
+
+    /** Offset of carriageway position [s] from the nearest junction centre on that carriageway. */
+    fun junctionOffset(s: Double): Double = s - round(s / JUNCTION_SPACING) * JUNCTION_SPACING
+
+    /** Carriageway position of the centre of the next junction whose exit is still ahead of [s]. */
+    fun nextJunctionCentre(s: Double): Double =
+        Math.ceil((s - DIVERGE_END) / JUNCTION_SPACING) * JUNCTION_SPACING
+
+    fun isDivergeZone(s: Double) = junctionOffset(s).let { it in DIVERGE_START..DIVERGE_END }
+    fun isMergeZone(s: Double) = junctionOffset(s).let { it in MERGE_START..MERGE_END }
+
+    /** Whether the extra lane (index -1) exists at carriageway position [s]. */
+    fun hasExtraLane(s: Double) = isDivergeZone(s) || isMergeZone(s)
+
+    fun deg(d: Double) = d * PI / 180
+}
+
+/** The two carriageways. Northbound is on the west side, as traffic keeps left. */
+enum class Carriageway(val dir: Int, val label: String) {
+    NORTH(1, "M17 North"),
+    SOUTH(-1, "M17 South");
+
+    /** World x of lateral position [m] (metres from the outer edge of this carriageway's hard shoulder). */
+    fun worldX(m: Double): Double =
+        if (this == NORTH) -(Road.CR_HALF + Road.WIDTH) + m else (Road.CR_HALF + Road.WIDTH) - m
+
+    fun worldY(s: Double): Double = dir * s
+    fun sOf(worldY: Double): Double = dir * worldY
+
+    /** Direction of travel (radians from east). */
+    val heading: Double get() = if (this == NORTH) PI / 2 else -PI / 2
+
+    val opposite: Carriageway get() = if (this == NORTH) SOUTH else NORTH
+
+    /** Carriageway position of junction [k]'s centre. */
+    fun junctionS(k: Int): Double = sOf(Road.junctionY(k))
+
+    /** Junction index for a junction centred at carriageway position [s]. */
+    fun junctionAt(s: Double): Int = Road.junctionNearest(worldY(s))
 }
 
 object Units {

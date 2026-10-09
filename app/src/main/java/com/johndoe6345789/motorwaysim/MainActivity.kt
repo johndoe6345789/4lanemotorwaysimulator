@@ -4,16 +4,16 @@ import android.app.Activity
 import android.os.Bundle
 import android.view.WindowInsets
 import android.view.WindowInsetsController
-import com.johndoe6345789.motorwaysim.ui.MotorwayView
+import com.johndoe6345789.motorwaysim.ui.GameView
 
 class MainActivity : Activity() {
-    private lateinit var motorway: MotorwayView
+    private lateinit var game: GameView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        motorway = MotorwayView(this)
-        setContentView(motorway)
-        motorway.requestFocus()
+        game = GameView(this)
+        setContentView(game)
+        game.requestFocus()
         hideSystemBars()
     }
 
@@ -24,11 +24,11 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        motorway.start()
+        game.onResume()
     }
 
     override fun onPause() {
-        motorway.stop()
+        game.onPause()
         super.onPause()
     }
 
