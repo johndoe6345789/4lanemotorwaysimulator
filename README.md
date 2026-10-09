@@ -22,13 +22,13 @@ coaches and HGVs stay out of lane 4.
 | --- | --- |
 | ![Incident](docs/incident.jpg) | ![Roundabout](docs/roundabout.jpg) |
 
-| Junction underpass: the motorway drops into a cutting under the roundabout | Inside the underpass |
+| Underpass junction: the motorway drops into a cutting under the roundabout | Overpass junction: the roundabout on bridges over the motorway |
 | --- | --- |
-| ![Underpass](docs/underpass.jpg) | ![Underpass interior](docs/tunnel.jpg) |
+| ![Underpass](docs/underpass.jpg) | ![Overpass](docs/overpass.jpg) |
 
-| Overbridge, from a coach | Disqualified |
-| --- | --- |
-| ![Overbridge](docs/bridge.jpg) | ![Banned](docs/banned.jpg) |
+| Inside an underpass | Overbridge, from a coach | Disqualified |
+| --- | --- | --- |
+| ![Underpass interior](docs/tunnel.jpg) | ![Overbridge](docs/bridge.jpg) | ![Banned](docs/banned.jpg) |
 
 ## Features
 
@@ -102,11 +102,14 @@ The AI traffic follows the same rules:
 - **UK road markings**: 2 m/7 m lane dashes and rumble strips. The cat's eyes are red
   at the hard shoulder, white between lanes, amber at the central reservation, and
   green where slip roads join.
-- **Junctions every 3 km**, each with:
-  - a **ground-level roundabout** with the motorway passing beneath it in an **underpass**:
-    the carriageways drop 7 m into a walled cutting (at most a 3.2% grade) and through a
-    covered section under the roundabout;
-  - an exit (diverge) lane and a level slip road that peels away before the cutting begins;
+- **Junctions every 3 km**, in two styles mixed along the route:
+  - **overpass**: the roundabout stands on bridges 7 m above the motorway, and the slip
+    roads and local roads climb up to it on retaining walls;
+  - **underpass**: the roundabout is at ground level and the motorway passes beneath it,
+    dropping 7 m into a walled cutting (at most a 3.2% grade) and through a lit, covered
+    section.
+- Each junction has:
+  - an exit (diverge) lane and a slip road that peels away early;
   - entry slips and acceleration lanes onto both carriageways;
   - a local A-road on each side, with a turning loop at the far end.
 - **Signs**:
@@ -150,9 +153,9 @@ The AI traffic follows the same rules:
 - Real-time **sun shadows** (shadow mapping) and a gradient sky with haze.
 - **Rolling hills** with hedgerows, copses and distant hills. Specular highlights on
   paintwork and glass, and textured asphalt.
-- Junction underpasses: the motorway runs down between retaining walls and through a lit,
-  covered section under each roundabout. Also overbridges between junctions, lighting
-  columns and gantries.
+- Junction overpasses on piers, and underpasses where the motorway runs down between
+  retaining walls and through a lit, covered section. Also overbridges between junctions,
+  lighting columns and gantries.
 - Four camera views: chase, high, bonnet and helicopter. The field of view widens with speed.
 
 ### Driving

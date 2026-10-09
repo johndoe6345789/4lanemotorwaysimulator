@@ -2,6 +2,7 @@ package com.johndoe6345789.motorwaysim.render
 
 import com.johndoe6345789.motorwaysim.sim.Carriageway
 import com.johndoe6345789.motorwaysim.sim.Junction
+import com.johndoe6345789.motorwaysim.sim.JunctionStyle
 import com.johndoe6345789.motorwaysim.sim.LinkKind
 import com.johndoe6345789.motorwaysim.sim.PathLink
 import com.johndoe6345789.motorwaysim.sim.Pose
@@ -412,7 +413,9 @@ object WorldMeshes {
      * over each portal.
      */
     private fun tunnel(b: MeshBuilder, y0: Double) {
-        val cy = Road.junctionY(Road.junctionNearest(y0 + CHUNK / 2))
+        val jk = Road.junctionNearest(y0 + CHUNK / 2)
+        if (Road.junctionStyle(jk) != JunctionStyle.UNDERPASS) return
+        val cy = Road.junctionY(jk)
         val lo = max(y0, cy - Road.TUNNEL_HALF)
         val hi = min(y0 + CHUNK, cy + Road.TUNNEL_HALF)
         if (lo >= hi) return
@@ -513,7 +516,7 @@ object WorldMeshes {
             val out = Road.RING_WIDTH / 2 + 1.2
             val ox = p.x + sin(p.heading) * out
             val oy = p.y - cos(p.heading) * out - cy
-            post(b, ox, oy, 2.4)
+            post(b, ox, oy, j.height + 2.4)
             // Facing approaching drivers: left edge further back along the ring.
             val hx = cos(p.heading)
             val hy = sin(p.heading)
@@ -522,14 +525,74 @@ object WorldMeshes {
             signs += SignFace(
                 ox - rx * 1.4 - hx * 0.1, oy - ry * 1.4 - hy * 0.1 + cy,
                 ox + rx * 1.4 - hx * 0.1, oy + ry * 1.4 - hy * 0.1 + cy,
-                1.2, 2.5, "exit_${port.name}",
+                j.height + 1.2, j.height + 2.5, "exit_${port.name}",
             )
         }
         return WorldPiece(b.build(), cy, signs)
     }
 
-    /** The roundabout at ground level: carriageway, kerbs, a planted central island and lighting. */
     private fun ring(b: MeshBuilder, j: Junction) {
+        if (j.style == JunctionStyle.OVERPASS) raisedRing(b, j) else groundRing(b, j)
+    }
+
+    /** A roundabout on bridges over the motorway: a deck with parapets, standing on piers. */
+    private fun raisedRing(b: MeshBuilder, j: Junction) {
+        val r = Road.RING_RADIUS
+        val ri = r - Road.RING_WIDTH / 2
+        val ro = r + Road.RING_WIDTH / 2
+        val z = j.height
+        val seg = 120
+        val armAngles = (j.entries + j.exits).map { 2 * PI * (1 - it.ringS / j.ring.length) + Road.deg(Junction.RING_START) }
+        for (i in 0 until seg) {
+            val a0 = 2 * PI * i / seg
+            val a1 = 2 * PI * (i + 1) / seg
+            val c0 = cos(a0); val s0 = sin(a0); val c1 = cos(a1); val s1 = sin(a1)
+            b.color(ASPHALT, 2f)
+            b.quad(ri * c0, ri * s0, z, ro * c0, ro * s0, z, ro * c1, ro * s1, z, ri * c1, ri * s1, z)
+            b.color(PAINT)
+            val e0 = ri + 0.35; val e1 = ri + 0.5
+            b.quad(e0 * c0, e0 * s0, z + 0.02, e1 * c0, e1 * s0, z + 0.02, e1 * c1, e1 * s1, z + 0.02, e0 * c1, e0 * s1, z + 0.02)
+            val f0 = ro - 0.5; val f1 = ro - 0.35
+            val nearArm = armAngles.any { abs(wrap(it - (a0 + a1) / 2)) < Road.deg(9.0) }
+            if (!nearArm) {
+                b.quad(f0 * c0, f0 * s0, z + 0.02, f1 * c0, f1 * s0, z + 0.02, f1 * c1, f1 * s1, z + 0.02, f0 * c1, f0 * s1, z + 0.02)
+            }
+            // Deck edges and underside.
+            b.color(DECK)
+            b.quad(ro * c0, ro * s0, z - 1.1, ro * c1, ro * s1, z - 1.1, ro * c1, ro * s1, z, ro * c0, ro * s0, z)
+            b.quad(ri * c1, ri * s1, z - 1.1, ri * c0, ri * s0, z - 1.1, ri * c0, ri * s0, z, ri * c1, ri * s1, z)
+            b.quad(ri * c1, ri * s1, z - 1.1, ro * c1, ro * s1, z - 1.1, ro * c0, ro * s0, z - 1.1, ri * c0, ri * s0, z - 1.1)
+            // Parapets: always on the inside, outside except where roads join.
+            b.color(BARRIER)
+            parapet(b, ri, ri - 0.3, c0, s0, c1, s1, z)
+            if (!nearArm) parapet(b, ro, ro + 0.3, c0, s0, c1, s1, z)
+        }
+        // Piers: outside the carriageways and in the central reservation.
+        b.color(DECK)
+        for (i in 0 until 24) {
+            val a = 2 * PI * i / 24
+            val x = r * cos(a)
+            val y = r * sin(a)
+            if (abs(x) in 1.0..(Road.CR_HALF + Road.WIDTH + 1.5)) continue
+            b.box(x - 0.7, x + 0.7, y - 0.7, y + 0.7, 0.0, z - 1.1)
+        }
+    }
+
+    /** A low concrete wall on the ring between radii [ra] (road side) and [rb], from angle 0 to 1. */
+    private fun parapet(b: MeshBuilder, ra: Double, rb: Double, c0: Double, s0: Double, c1: Double, s1: Double, z: Double) {
+        val h = 0.9
+        // Each face is drawn with both windings so it is lit from either side; the wall's
+        // thickness keeps the two faces apart, avoiding z-fighting.
+        for (r in doubleArrayOf(ra, rb)) {
+            b.quad(r * c0, r * s0, z, r * c1, r * s1, z, r * c1, r * s1, z + h, r * c0, r * s0, z + h)
+            b.quad(r * c1, r * s1, z, r * c0, r * s0, z, r * c0, r * s0, z + h, r * c1, r * s1, z + h)
+        }
+        b.quad(ra * c0, ra * s0, z + h, rb * c0, rb * s0, z + h, rb * c1, rb * s1, z + h, ra * c1, ra * s1, z + h)
+        b.quad(rb * c0, rb * s0, z + h, ra * c0, ra * s0, z + h, ra * c1, ra * s1, z + h, rb * c1, rb * s1, z + h)
+    }
+
+    /** A roundabout at ground level: carriageway, kerbs, a planted central island and lighting. */
+    private fun groundRing(b: MeshBuilder, j: Junction) {
         val r = Road.RING_RADIUS
         val ri = r - Road.RING_WIDTH / 2
         val ro = r + Road.RING_WIDTH / 2
@@ -639,6 +702,18 @@ object WorldMeshes {
                 if (!centreDash || ((s / 6).toInt() % 2 == 0 && link.kind == LinkKind.LOCAL_IN)) {
                     edgeLine(b, rx0, ry0, rx1, ry1, lx0, ly0, lx1, ly1, z0, z1, 0.15, 0.3)
                 }
+                // Retaining walls and parapets where the road climbs to a raised roundabout.
+                if (z0 > 0.3 || z1 > 0.3) {
+                    b.color(DECK)
+                    b.quad(lx1, ly1, 0.0, lx0, ly0, 0.0, lx0, ly0, z0, lx1, ly1, z1)
+                    b.quad(rx0, ry0, 0.0, rx1, ry1, 0.0, rx1, ry1, z1, rx0, ry0, z0)
+                }
+                if (z0 > 1.5 && z1 > 1.5) {
+                    b.color(BARRIER)
+                    // Local roads are two-way: only their outer (left) edges get a wall.
+                    parapetAlong(b, lx0, ly0, lx1, ly1, z0, z1)
+                    if (!local) parapetAlong(b, rx1, ry1, rx0, ry0, z1, z0)
+                }
             }
             prev = if (inside) null else cur
         }
@@ -680,5 +755,17 @@ object WorldMeshes {
         val cross = (q0x - p0x) * (p1y - p0y) - (q0y - p0y) * (p1x - p0x)
         if (cross < 0) b.quad(p0x, p0y, z0 + 0.02, p1x, p1y, z1 + 0.02, q1x, q1y, z1 + 0.02, q0x, q0y, z0 + 0.02)
         else b.quad(p0x, p0y, z0 + 0.02, q0x, q0y, z0 + 0.02, q1x, q1y, z1 + 0.02, p1x, p1y, z1 + 0.02)
+    }
+
+    /** A wall along the road edge from (x0, y0) to (x1, y1); its outside is to the left of that direction. */
+    private fun parapetAlong(b: MeshBuilder, x0: Double, y0: Double, x1: Double, y1: Double, z0: Double, z1: Double) {
+        val len = hypot(x1 - x0, y1 - y0)
+        if (len < 1e-6) return
+        val ox = -(y1 - y0) / len * 0.3
+        val oy = (x1 - x0) / len * 0.3
+        val h = 0.9
+        b.quad(x0, y0, z0, x1, y1, z1, x1, y1, z1 + h, x0, y0, z0 + h) // road side
+        b.quad(x1 + ox, y1 + oy, z1, x0 + ox, y0 + oy, z0, x0 + ox, y0 + oy, z0 + h, x1 + ox, y1 + oy, z1 + h) // outside
+        b.quad(x1, y1, z1 + h, x1 + ox, y1 + oy, z1 + h, x0 + ox, y0 + oy, z0 + h, x0, y0, z0 + h) // top
     }
 }

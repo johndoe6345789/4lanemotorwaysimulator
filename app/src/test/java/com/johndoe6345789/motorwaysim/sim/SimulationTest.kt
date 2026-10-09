@@ -37,14 +37,20 @@ class JunctionGeometryTest {
     @Test
     fun slipRoadsMeetTheMotorwayAndTheRoundabout() {
         val net = Network()
-        val j = net.junction(1)
+        for (k in 0..6) slipRoadsMeet(net, net.junction(k))
+        // Both styles are in the mix.
+        assertEquals(JunctionStyle.entries.toSet(), (0..6).map { Road.junctionStyle(it) }.toSet())
+    }
+
+    private fun slipRoadsMeet(net: Network, j: Junction) {
+        val k = j.k
         val p = Pose()
         val q = Pose()
         for (cw in Carriageway.entries) {
             val mw = net.motorway.getValue(cw)
             // Exit slip starts where the diverge lane ends.
             j.offSlip.getValue(cw).pose(0.0, 0.0, p)
-            mw.pose(cw.junctionS(1) + Road.DIVERGE_END, -1.0, q)
+            mw.pose(cw.junctionS(k) + Road.DIVERGE_END, -1.0, q)
             assertTrue("off-slip start ${p.x},${p.y} vs ${q.x},${q.y}", hypot(p.x - q.x, p.y - q.y) < 0.5)
             assertEquals(q.heading, p.heading, 0.05)
             assertEquals(q.z, p.z, 0.01)
@@ -67,11 +73,12 @@ class JunctionGeometryTest {
     @Test
     fun motorwayPassesUnderTheRoundaboutInAnUnderpass() {
         val net = Network()
-        val j = net.junction(1)
+        val k = (0..10).first { Road.junctionStyle(it) == JunctionStyle.UNDERPASS }
+        val j = net.junction(k)
         val p = Pose()
         for (cw in Carriageway.entries) {
             val mw = net.motorway.getValue(cw)
-            val centre = cw.junctionS(1)
+            val centre = cw.junctionS(k)
             mw.pose(centre, 1.5, p)
             assertEquals(-Road.UNDERPASS_DEPTH, p.z, 1e-9)
             // Level wherever there is a diverge or merge lane, and never steeper than 4%.
@@ -98,6 +105,38 @@ class JunctionGeometryTest {
                     assertEquals("${link.label} at ${p.x},${p.y - j.centreY} runs into the cutting", 0.0, Road.motorwayZ(p.y), 0.05)
                 }
                 s += 1.0
+            }
+        }
+    }
+
+    @Test
+    fun overpassRoundaboutStandsOnBridgesOverTheMotorway() {
+        val net = Network()
+        val k = (0..10).first { Road.junctionStyle(it) == JunctionStyle.OVERPASS }
+        val j = net.junction(k)
+        val p = Pose()
+        for (cw in Carriageway.entries) {
+            val mw = net.motorway.getValue(cw)
+            var s = cw.junctionS(k) - 1400
+            while (s < cw.junctionS(k) + 1400) {
+                mw.pose(s, 0.0, p)
+                assertEquals(0.0, p.z, 1e-9)
+                s += 5.0
+            }
+        }
+        j.ring.pose(10.0, 0.0, p)
+        assertEquals(Road.OVERPASS_HEIGHT, p.z, 1e-9)
+        // The slip and local roads climb to it gently.
+        for (link in j.links) {
+            if (link === j.ring) continue
+            var s = 0.0
+            link.pose(0.0, 0.0, p)
+            var lastZ = p.z
+            while (s < link.length) {
+                s += 1.0
+                link.pose(s, 0.0, p)
+                assertTrue("${link.label} too steep at $s", abs(p.z - lastZ) <= 0.06)
+                lastZ = p.z
             }
         }
     }

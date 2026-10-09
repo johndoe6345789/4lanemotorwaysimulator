@@ -164,5 +164,11 @@ class Path(private val xs: DoubleArray, private val ys: DoubleArray, zFn: (Doubl
             val ys = DoubleArray(count) { cy + r * sin(a0 + sweep * it / (count - 1)) }
             return Path(xs, ys) { z }
         }
+
+        /** Elevation rising smoothly from [z0] to [z1] between fractions [u0] and [u1] of the length. */
+        fun ramp(z0: Double, z1: Double, u0: Double, u1: Double): (Double) -> Double = { u ->
+            val t = ((u - u0) / (u1 - u0)).coerceIn(0.0, 1.0)
+            z0 + (z1 - z0) * t * t * (3 - 2 * t)
+        }
     }
 }

@@ -42,7 +42,7 @@ object Road {
     const val MERGE_END = 920.0
     const val FIRST_JUNCTION_NUMBER = 20
 
-    // Ground-level roundabout; the motorway passes beneath it in an underpass.
+    // The roundabout at each junction.
     const val RING_RADIUS = 52.0
     const val RING_WIDTH = 7.5
     const val RING_SPEED_MPH = 30
@@ -51,9 +51,19 @@ object Road {
     const val LOCAL_OFFSET = 2.0
     const val LOCAL_LIMIT_MPH = 40
 
-    // Underpass: at each junction the motorway drops into a cutting between retaining walls and
-    // runs through a covered section under the roundabout. The slip roads, the roundabout and
-    // the local roads stay at ground level, so the diverge and merge lanes are level too.
+    /** How junction [k] crosses the motorway: a mix of the two, in an irregular pattern. */
+    fun junctionStyle(k: Int): JunctionStyle =
+        if (Math.floorMod(k * 5 + 2, 7) < 3) JunctionStyle.OVERPASS else JunctionStyle.UNDERPASS
+
+    /** Height of junction [k]'s roundabout above the ground. */
+    fun ringHeight(k: Int): Double = if (junctionStyle(k) == JunctionStyle.OVERPASS) OVERPASS_HEIGHT else 0.0
+
+    /** An overpass roundabout stands on bridges this high above the motorway. */
+    const val OVERPASS_HEIGHT = 7.0
+
+    // Underpass: the motorway drops into a cutting between retaining walls and runs through a
+    // covered section under the roundabout. The slip roads, the roundabout and the local roads
+    // stay at ground level, so the diverge and merge lanes are level too.
     const val UNDERPASS_DEPTH = 7.0
 
     /** Within this distance of the junction centre the cutting is at full depth. */
@@ -73,15 +83,20 @@ object Road {
 
     /** Height of the motorway at world [y]: 0 at ground level, negative in an underpass cutting. */
     fun motorwayZ(y: Double): Double {
-        val d = abs(y - junctionY(junctionNearest(y)))
+        val k = junctionNearest(y)
+        if (junctionStyle(k) == JunctionStyle.OVERPASS) return 0.0
+        val d = abs(y - junctionY(k))
         if (d >= CUTTING_TOP) return 0.0
         if (d <= CUTTING_FLAT) return -UNDERPASS_DEPTH
         val t = (d - CUTTING_FLAT) / (CUTTING_TOP - CUTTING_FLAT)
         return -UNDERPASS_DEPTH * (1 + cos(PI * t)) / 2
     }
 
-    /** Whether world [y] is under the roundabout's covered section. */
-    fun inTunnel(y: Double): Boolean = abs(y - junctionY(junctionNearest(y))) < TUNNEL_HALF
+    /** Whether world [y] is in an underpass's covered section. */
+    fun inTunnel(y: Double): Boolean {
+        val k = junctionNearest(y)
+        return junctionStyle(k) == JunctionStyle.UNDERPASS && abs(y - junctionY(k)) < TUNNEL_HALF
+    }
 
     /** Lateral centre of a (possibly fractional) lane, measured from the outer edge of the hard shoulder. */
     fun laneCenter(lane: Double): Double = HARD_SHOULDER + LANE_WIDTH * (lane + 0.5)
@@ -111,6 +126,13 @@ object Road {
 
     fun deg(d: Double) = d * PI / 180
 }
+
+/**
+ * How a junction crosses the motorway. UK motorway roundabouts come both ways: on bridges
+ * over the motorway, with slip roads climbing up to them, or at ground level with the
+ * motorway passing beneath in an underpass.
+ */
+enum class JunctionStyle { OVERPASS, UNDERPASS }
 
 /** The two carriageways. Northbound is on the west side, as traffic keeps left. */
 enum class Carriageway(val dir: Int, val label: String) {
