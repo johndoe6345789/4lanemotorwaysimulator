@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A stretch of four-lane road with a car, drawn in the 108dp adaptive icon grid. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FF3A3D42" android:pathData="M30,18 L78,18 L78,90 L30,90 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M31.5,18 L33,18 L33,90 L31.5,90 Z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M75,18 L76.5,18 L76.5,90 L75,90 Z" />
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M43.5,20 h1.2 v8 h-1.2 Z M43.5,36 h1.2 v8 h-1.2 Z M43.5,52 h1.2 v8 h-1.2 Z M43.5,68 h1.2 v8 h-1.2 Z M43.5,84 h1.2 v6 h-1.2 Z
+                          M53.4,20 h1.2 v8 h-1.2 Z M53.4,36 h1.2 v8 h-1.2 Z M53.4,52 h1.2 v8 h-1.2 Z M53.4,68 h1.2 v8 h-1.2 Z M53.4,84 h1.2 v6 h-1.2 Z
+                          M63.3,20 h1.2 v8 h-1.2 Z M63.3,36 h1.2 v8 h-1.2 Z M63.3,52 h1.2 v8 h-1.2 Z M63.3,68 h1.2 v8 h-1.2 Z M63.3,84 h1.2 v6 h-1.2 Z" />
+    <path android:fillColor="#FFFFC21A" android:pathData="M46.5,56 h6 a1.5,1.5 0 0 1 1.5,1.5 v11 a1.5,1.5 0 0 1 -1.5,1.5 h-6 a1.5,1.5 0 0 1 -1.5,-1.5 v-11 a1.5,1.5 0 0 1 1.5,-1.5 Z" />
+    <path android:fillColor="#FF1B2330" android:pathData="M46.5,58.5 h6 v3 h-6 Z" />
+    <path android:fillColor="#FFE53935" android:pathData="M56.5,30 h6 a1.5,1.5 0 0 1 1.5,1.5 v11 a1.5,1.5 0 0 1 -1.5,1.5 h-6 a1.5,1.5 0 0 1 -1.5,-1.5 v-11 a1.5,1.5 0 0 1 1.5,-1.5 Z" />
+    <path android:fillColor="#FF1B2330" android:pathData="M56.5,32.5 h6 v3 h-6 Z" />
+</vector>

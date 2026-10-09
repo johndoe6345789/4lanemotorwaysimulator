@@ -1,0 +1,32 @@
+name: Android build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Installs exactly what the build needs, including the Android 17 (API 37) platform.
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-37.0 build-tools;37.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build, unit test and lint
+        run: ./gradlew assembleDebug testDebugUnitTest lintDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motorway-simulator-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
