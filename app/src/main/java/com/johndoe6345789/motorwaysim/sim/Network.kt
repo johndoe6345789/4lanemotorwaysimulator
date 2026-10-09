@@ -3,6 +3,7 @@ package com.johndoe6345789.motorwaysim.sim
 import java.util.EnumMap
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.sin
 
 enum class LinkKind { MOTORWAY, OFF_SLIP, ON_SLIP, RING, LOCAL_IN, LOCAL_OUT, LOOP }
@@ -48,7 +49,7 @@ class MotorwayLink(val cw: Carriageway) : Link(LinkKind.MOTORWAY, null) {
     override fun pose(s: Double, lateral: Double, out: Pose) {
         out.x = cw.worldX(Road.laneCenter(lateral))
         out.y = cw.worldY(s)
-        out.z = 0.0
+        out.z = Road.motorwayZ(out.y)
         out.heading = cw.heading
     }
 }
@@ -87,9 +88,9 @@ class RingLink(junction: Junction, val path: Path) : Link(LinkKind.RING, junctio
 class RingPort(val ringS: Double, val link: PathLink, val isEntry: Boolean, val name: String)
 
 /**
- * A grade-separated junction: an elevated roundabout spanning the motorway with two
- * bridges, connected to each carriageway by an exit (off) slip and an entry (on) slip,
- * plus a local A-road on each side.
+ * A grade-separated junction: a ground-level roundabout over the motorway, which passes
+ * beneath it in an underpass, connected to each carriageway by an exit (off) slip and an
+ * entry (on) slip, plus a local A-road on each side. Everything here is at ground level.
  *
  * Arms are laid out for the northbound side and then rotated by 180° for the southbound side.
  */
@@ -109,55 +110,55 @@ class Junction(val k: Int) {
     init {
         val r = Road.RING_RADIUS
         val cy = centreY
-        val ringPath = Path.arc(0.0, cy, r, Road.deg(RING_START), -2 * PI, Road.RING_HEIGHT)
+        val ringPath = Path.arc(0.0, cy, r, Road.deg(RING_START), -2 * PI, 0.0)
         ring = RingLink(this, ringPath)
         links += ring
 
         for (cw in Carriageway.entries) {
             val side = if (cw == Carriageway.NORTH) "West" else "East"
             val rotate = cw == Carriageway.SOUTH
-            fun build(kind: LinkKind, limit: Int, label: String, make: () -> Path, z: (Double) -> Double): PathLink {
+            val level = { _: Double -> 0.0 }
+            fun build(kind: LinkKind, limit: Int, label: String, make: () -> Path): PathLink {
                 val p = make()
-                val path = if (rotate) p.rotated180(0.0, cy, z) else p
+                val path = if (rotate) p.rotated180(0.0, cy, level) else p
                 return PathLink(kind, this, path, limit, label).also { links += it }
             }
 
-            // Exit slip: leaves the diverge lane and climbs to the roundabout.
+            // Exit slip: leaves the diverge lane, which stays at ground level while the motorway
+            // drops into the cutting, and runs to the roundabout.
             val js = Road.DIVERGE_END
             val x0 = Carriageway.NORTH.worldX(Road.laneCenter(-1.0))
             val (ex, ey, eh) = ringEntryPoint(ARM_NB_OFF)
-            val offZ = Path.ramp(0.05, Road.RING_HEIGHT, 0.2, 0.92)
-            val off = build(LinkKind.OFF_SLIP, Road.NATIONAL_LIMIT_MPH, "Exit slip", {
-                Path.bezier(x0, cy + js, PI / 2, ex, cy + ey, eh, offZ)
-            }, offZ)
+            // It peels away early, to clear the cutting's wall before the motorway starts to dip.
+            val off = build(LinkKind.OFF_SLIP, Road.NATIONAL_LIMIT_MPH, "Exit slip") {
+                Path.bezier(x0, cy + js, PI / 2, ex, cy + ey, eh, level, handle = 130.0, handleEnd = hypot(ex - x0, ey - js) / 3)
+            }
             offSlip[cw] = off
 
-            // Entry slip: from the roundabout down to the acceleration lane.
+            // Entry slip: from the roundabout to the acceleration lane, where the motorway has
+            // climbed back out of the cutting.
             val (xx, xy, xh) = ringExitPoint(ARM_NB_ON)
-            val onZ = Path.ramp(Road.RING_HEIGHT, 0.05, 0.08, 0.8)
-            val on = build(LinkKind.ON_SLIP, Road.NATIONAL_LIMIT_MPH, "Entry slip", {
-                Path.bezier(xx, cy + xy, xh, x0, cy + Road.MERGE_START, PI / 2, onZ)
-            }, onZ)
+            val on = build(LinkKind.ON_SLIP, Road.NATIONAL_LIMIT_MPH, "Entry slip") {
+                Path.bezier(xx, cy + xy, xh, x0, cy + Road.MERGE_START, PI / 2, level, handleEnd = 160.0)
+            }
             onSlip[cw] = on
 
             // Local A-road: two-way, with a turning loop at the far end.
             val far = -(Road.RING_RADIUS + Road.LOCAL_LENGTH)
             val off2 = Road.LOCAL_OFFSET
             val (ix, iy, ih) = ringEntryPoint(ARM_LOCAL_IN, LOCAL_RADIAL)
-            val inZ = Path.ramp(0.0, Road.RING_HEIGHT, 0.55, 0.97)
-            val lin = build(LinkKind.LOCAL_IN, Road.LOCAL_LIMIT_MPH, "A71 $side", {
-                Path.bezier(far, cy + off2, 0.0, ix, cy + iy, ih, inZ, handle = 250.0, handleEnd = 30.0)
-            }, inZ)
+            val lin = build(LinkKind.LOCAL_IN, Road.LOCAL_LIMIT_MPH, "A71 $side") {
+                Path.bezier(far, cy + off2, 0.0, ix, cy + iy, ih, level, handle = 250.0, handleEnd = 30.0)
+            }
             localIn[cw] = lin
             val (ox, oy, oh) = ringExitPoint(ARM_LOCAL_OUT, LOCAL_RADIAL)
-            val outZ = Path.ramp(Road.RING_HEIGHT, 0.0, 0.03, 0.45)
-            val lout = build(LinkKind.LOCAL_OUT, Road.LOCAL_LIMIT_MPH, "A71 $side", {
-                Path.bezier(ox, cy + oy, oh, far, cy - off2, PI, outZ, handle = 30.0, handleEnd = 250.0)
-            }, outZ)
+            val lout = build(LinkKind.LOCAL_OUT, Road.LOCAL_LIMIT_MPH, "A71 $side") {
+                Path.bezier(ox, cy + oy, oh, far, cy - off2, PI, level, handle = 30.0, handleEnd = 250.0)
+            }
             localOut[cw] = lout
-            val lp = build(LinkKind.LOOP, 15, "Turning loop", {
-                Path.bezier(far, cy - off2, PI, far, cy + off2, 0.0, { 0.0 }, handle = 16.0)
-            }, { 0.0 })
+            val lp = build(LinkKind.LOOP, 15, "Turning loop") {
+                Path.bezier(far, cy - off2, PI, far, cy + off2, 0.0, level, handle = 16.0)
+            }
             loop[cw] = lp
 
             // Connections.

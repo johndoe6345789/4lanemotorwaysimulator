@@ -47,19 +47,58 @@ class JunctionGeometryTest {
             mw.pose(cw.junctionS(1) + Road.DIVERGE_END, -1.0, q)
             assertTrue("off-slip start ${p.x},${p.y} vs ${q.x},${q.y}", hypot(p.x - q.x, p.y - q.y) < 0.5)
             assertEquals(q.heading, p.heading, 0.05)
+            assertEquals(q.z, p.z, 0.01)
             // Entry slip ends at the acceleration lane.
             val on = j.onSlip.getValue(cw)
             on.pose(on.length, 0.0, p)
             mw.pose(on.nextS, -1.0, q)
             assertTrue(hypot(p.x - q.x, p.y - q.y) < 0.5)
-            assertEquals(0.05, p.z, 0.01)
+            assertEquals(q.z, p.z, 0.01)
         }
-        // Every entry and exit touches the elevated ring.
+        // Every entry and exit touches the roundabout.
         for (port in j.entries + j.exits) {
             port.link.pose(if (port.isEntry) port.link.length else 0.0, 0.0, p)
             j.ring.pose(port.ringS, 0.0, q)
             assertTrue("port ${port.name} off the ring", hypot(p.x - q.x, p.y - q.y) < 0.5)
-            assertEquals(Road.RING_HEIGHT, p.z, 0.05)
+            assertEquals(q.z, p.z, 0.01)
+        }
+    }
+
+    @Test
+    fun motorwayPassesUnderTheRoundaboutInAnUnderpass() {
+        val net = Network()
+        val j = net.junction(1)
+        val p = Pose()
+        for (cw in Carriageway.entries) {
+            val mw = net.motorway.getValue(cw)
+            val centre = cw.junctionS(1)
+            mw.pose(centre, 1.5, p)
+            assertEquals(-Road.UNDERPASS_DEPTH, p.z, 1e-9)
+            // Level wherever there is a diverge or merge lane, and never steeper than 4%.
+            var s = centre - 1400
+            var lastZ = Double.NaN
+            while (s < centre + 1400) {
+                mw.pose(s, 0.0, p)
+                if (Road.hasExtraLane(s)) assertEquals("at offset ${s - centre}", 0.0, p.z, 1e-9)
+                if (!lastZ.isNaN()) assertTrue("grade at offset ${s - centre}", abs(p.z - lastZ) <= 0.04 * 1.0 + 1e-9)
+                lastZ = p.z
+                s += 1.0
+            }
+        }
+        // The roundabout and its roads are at ground level, and keep clear of the cutting's
+        // walls except where they cross over the covered section.
+        for (link in j.links) {
+            var s = 0.0
+            while (s <= link.length) {
+                link.pose(s, 0.0, p)
+                assertEquals(0.0, p.z, 1e-9)
+                val reachesCorridor = abs(p.x) - link.halfWidth < Road.CUTTING_HALF_WIDTH + 0.3
+                val overRoof = abs(p.y - j.centreY) < Road.TUNNEL_HALF - 1
+                if (reachesCorridor && !overRoof) {
+                    assertEquals("${link.label} at ${p.x},${p.y - j.centreY} runs into the cutting", 0.0, Road.motorwayZ(p.y), 0.05)
+                }
+                s += 1.0
+            }
         }
     }
 

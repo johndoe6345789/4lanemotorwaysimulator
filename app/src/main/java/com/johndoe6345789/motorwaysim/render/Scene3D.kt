@@ -138,7 +138,8 @@ class Scene3D(private val atlas: SignAtlas) {
         f.next().apply {
             mesh = WorldMeshes.ground
             ground = true
-            Mat4.translation(model, round(eyeX / 100) * 100 - ox, round(eyeY / 100) * 100 - oy, 0.0)
+            // Only along the motorway: the plane has a gap for the motorway corridor at x = 0.
+            Mat4.translation(model, -ox, round(eyeY / 100) * 100 - oy, 0.0)
         }
         f.next().apply {
             mesh = hills
@@ -177,13 +178,15 @@ class Scene3D(private val atlas: SignAtlas) {
             for (w in inc.wrecks) {
                 for ((k, back) in doubleArrayOf(12.0, 13.4).withIndex()) {
                     val s = w.rear - back
-                    val x = cw.worldX(-4.2 - k * 0.7)
                     val y = cw.worldY(s)
-                    if (!visible(x, y, 0.0, 3.0, f.fogEnd.toDouble())) continue
+                    // Behind the barrier, or in an underpass cutting, on the verge against the wall.
+                    val z = Road.motorwayZ(y)
+                    val x = if (z < -0.3) cw.worldX(-0.55) else cw.worldX(-4.2 - k * 0.7)
+                    if (!visible(x, y, z, 3.0, f.fogEnd.toDouble())) continue
                     f.next().apply {
                         mesh = VehicleModels.person
                         castsShadow = true
-                        Mat4.model(model, x - ox, y - oy, 0.0, cw.heading + PI)
+                        Mat4.model(model, x - ox, y - oy, z, cw.heading + PI)
                     }
                 }
             }
@@ -255,6 +258,24 @@ class Scene3D(private val atlas: SignAtlas) {
             VehicleModels.models.values.flatMap { m -> m.parts.map { it.mesh } } +
             listOf(WorldMeshes.ground, hills, VehicleModels.person)
 
+    /**
+     * Keeps the camera above the ground and, at an underpass, inside the cutting and below the
+     * roof: the higher views come down as the vehicle nears the portal and rise again after.
+     */
+    private fun keepEyeInCutting(px: Double, py: Double) {
+        val corridor = Road.CUTTING_HALF_WIDTH - 0.4
+        val inCutting = abs(px) < corridor && Road.motorwayZ(py) < 0.0
+        // With the vehicle down in a cutting, keep the camera over it, within the walls...
+        if (inCutting) eyeX = eyeX.coerceIn(-corridor, corridor)
+        eyeZ = max(eyeZ, if (abs(eyeX) < corridor) Road.motorwayZ(eyeY) + 0.6 else 0.6)
+        if (!inCutting) return
+        // ...and below the roof, by how far the vehicle or the camera (whichever is nearer) is
+        // from the covered section.
+        fun toPortal(y: Double) = abs(y - Road.junctionY(Road.junctionNearest(y))) - Road.TUNNEL_HALF
+        val cap = WorldMeshes.TUNNEL_CEILING - 0.35 + max(0.0, min(toPortal(py), toPortal(eyeY))) * 0.6
+        if (eyeZ > cap) eyeZ = cap
+    }
+
     /** Rough culling: within [reach] of the eye and not well behind it. */
     private fun visible(x: Double, y: Double, z: Double, radius: Double, reach: Double): Boolean {
         val dx = x - eyeX
@@ -315,7 +336,7 @@ class Scene3D(private val atlas: SignAtlas) {
                 }
             }
         }
-        eyeZ = max(eyeZ, 0.6)
+        keepEyeInCutting(px, py)
         val fl = sqrt((lx - eyeX) * (lx - eyeX) + (ly - eyeY) * (ly - eyeY) + (lz - eyeZ) * (lz - eyeZ))
         fwdX = (lx - eyeX) / fl; fwdY = (ly - eyeY) / fl; fwdZ = (lz - eyeZ) / fl
 

@@ -274,9 +274,12 @@ class Simulation(seed: Long = System.nanoTime()) {
         // the rest stop in a live lane.
         val lane = inLane ?: if (rng.nextDouble() < 0.55) -1 else rng.nextInt(Road.LANES)
         val ahead = if (player.link === link) player.s else cw.sOf(focusY)
-        var s = ahead + 820.0
-        // Keep the whole scene, from the queue behind to the recovery truck in front, clear of slip lanes.
-        while (Road.hasExtraLane(s + 60) || Road.hasExtraLane(s) || Road.hasExtraLane(s - 200)) s += 150.0
+        // Keep the whole scene, from the queue behind to the recovery truck in front, clear of slip
+        // lanes, and hard-shoulder breakdowns out of the covered section under the roundabout.
+        // Search back from 820 m ahead: further on would be beyond the simulated stretch.
+        fun clear(at: Double) = !Road.hasExtraLane(at) && (lane >= 0 || !Road.inTunnel(cw.worldY(at)))
+        val s = (0..21).map { ahead + 820.0 - it * 25.0 }.firstOrNull { clear(it + 60) && clear(it) && clear(it - 200) }
+            ?: (ahead + 820.0)
         vehicles.removeAll { !it.isPlayer && it.link === link && it.occupies(lane) && it.s > s - 160 && it.rear < s + 20 }
         val type = if (rng.nextDouble() < 0.25) VehicleType.VAN else VehicleType.CAR
         val bd = Vehicle(nextId++, type, link, s, lane, 0.0, 1.0, 0.0, false, CAR_COLORS[rng.nextInt(CAR_COLORS.size)])
@@ -1348,6 +1351,8 @@ class Simulation(seed: Long = System.nanoTime()) {
 
     /** Whether [c] can be inserted into lane [l] without forcing anyone to brake hard. */
     internal fun fitsAt(c: Vehicle, link: Link, l: Int): Boolean {
+        // Something right alongside, even at exactly the same position (two vehicles placed in one step).
+        if (link.list(l).any { it !== c && it.s > c.rear - 1 && it.rear < c.s + 1 }) return false
         val leader = nearestAhead(link, l, c.s, c, Idm.LOOKAHEAD)
         if (leader != null) {
             val gap = leader.rear - c.s

@@ -4,7 +4,7 @@ A 3D UK motorway driving and traffic simulator for **Android 17** (API level 37)
 
 Pick a vehicle and drive it yourself on a dual four-lane motorway in busy traffic. You can
 drive a hatchback, sports car, van, coach, HGV, police car or recovery truck. Steer freely
-between lanes, leave at a junction, go round the elevated roundabout and join the other
+between lanes, leave at a junction, go round the roundabout and join the other
 carriageway. Your driving is judged against the **UK Highway Code**: break a rule and you
 get the rule number and penalty points, and 12 points means a ban. The AI traffic follows
 the same rules: it keeps left, signals before it moves, keeps its distance, and its
@@ -21,6 +21,10 @@ coaches and HGVs stay out of lane 4.
 | Police protecting a closed lane (red X, 50 mph) | On the roundabout |
 | --- | --- |
 | ![Incident](docs/incident.jpg) | ![Roundabout](docs/roundabout.jpg) |
+
+| Junction underpass: the motorway drops into a cutting under the roundabout | Inside the underpass |
+| --- | --- |
+| ![Underpass](docs/underpass.jpg) | ![Underpass interior](docs/tunnel.jpg) |
 
 | Overbridge, from a coach | Disqualified |
 | --- | --- |
@@ -99,8 +103,10 @@ The AI traffic follows the same rules:
   at the hard shoulder, white between lanes, amber at the central reservation, and
   green where slip roads join.
 - **Junctions every 3 km**, each with:
-  - an exit (diverge) lane and a slip road climbing to an **elevated two-bridge roundabout**
-    over the motorway;
+  - a **ground-level roundabout** with the motorway passing beneath it in an **underpass**:
+    the carriageways drop 7 m into a walled cutting (at most a 3.2% grade) and through a
+    covered section under the roundabout;
+  - an exit (diverge) lane and a level slip road that peels away before the cutting begins;
   - entry slips and acceleration lanes onto both carriageways;
   - a local A-road on each side, with a turning loop at the far end.
 - **Signs**:
@@ -144,8 +150,9 @@ The AI traffic follows the same rules:
 - Real-time **sun shadows** (shadow mapping) and a gradient sky with haze.
 - **Rolling hills** with hedgerows, copses and distant hills. Specular highlights on
   paintwork and glass, and textured asphalt.
-- Overbridges between junctions, lighting columns, gantries, and an elevated roundabout
-  on bridges.
+- Junction underpasses: the motorway runs down between retaining walls and through a lit,
+  covered section under each roundabout. Also overbridges between junctions, lighting
+  columns and gantries.
 - Four camera views: chase, high, bonnet and helicopter. The field of view widens with speed.
 
 ### Driving

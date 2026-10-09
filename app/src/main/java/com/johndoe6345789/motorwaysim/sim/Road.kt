@@ -1,6 +1,8 @@
 package com.johndoe6345789.motorwaysim.sim
 
 import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.round
 
@@ -34,21 +36,52 @@ object Road {
     // Junctions: one every JUNCTION_SPACING metres. Offsets are relative to the junction
     // centre, measured along each carriageway in its direction of travel.
     const val JUNCTION_SPACING = 3000.0
-    const val DIVERGE_START = -900.0
-    const val DIVERGE_END = -650.0
-    const val MERGE_START = 500.0
-    const val MERGE_END = 720.0
+    const val DIVERGE_START = -950.0
+    const val DIVERGE_END = -700.0
+    const val MERGE_START = 700.0
+    const val MERGE_END = 920.0
     const val FIRST_JUNCTION_NUMBER = 20
 
-    // Elevated roundabout over the motorway.
+    // Ground-level roundabout; the motorway passes beneath it in an underpass.
     const val RING_RADIUS = 52.0
-    const val RING_HEIGHT = 7.0
     const val RING_WIDTH = 7.5
     const val RING_SPEED_MPH = 30
     const val SLIP_WIDTH = 4.5
     const val LOCAL_LENGTH = 650.0
     const val LOCAL_OFFSET = 2.0
     const val LOCAL_LIMIT_MPH = 40
+
+    // Underpass: at each junction the motorway drops into a cutting between retaining walls and
+    // runs through a covered section under the roundabout. The slip roads, the roundabout and
+    // the local roads stay at ground level, so the diverge and merge lanes are level too.
+    const val UNDERPASS_DEPTH = 7.0
+
+    /** Within this distance of the junction centre the cutting is at full depth. */
+    const val CUTTING_FLAT = 90.0
+
+    /**
+     * Beyond this distance of the junction centre the motorway is back at ground level. The
+     * slip roads stay outside the cutting's walls until then (a 3.2% grade at most).
+     */
+    const val CUTTING_TOP = 430.0
+
+    /** Half the length of the covered section under the roundabout. */
+    const val TUNNEL_HALF = 62.0
+
+    /** The retaining walls stand this far either side of the centre line. */
+    const val CUTTING_HALF_WIDTH = CR_HALF + WIDTH + 1.0
+
+    /** Height of the motorway at world [y]: 0 at ground level, negative in an underpass cutting. */
+    fun motorwayZ(y: Double): Double {
+        val d = abs(y - junctionY(junctionNearest(y)))
+        if (d >= CUTTING_TOP) return 0.0
+        if (d <= CUTTING_FLAT) return -UNDERPASS_DEPTH
+        val t = (d - CUTTING_FLAT) / (CUTTING_TOP - CUTTING_FLAT)
+        return -UNDERPASS_DEPTH * (1 + cos(PI * t)) / 2
+    }
+
+    /** Whether world [y] is under the roundabout's covered section. */
+    fun inTunnel(y: Double): Boolean = abs(y - junctionY(junctionNearest(y))) < TUNNEL_HALF
 
     /** Lateral centre of a (possibly fractional) lane, measured from the outer edge of the hard shoulder. */
     fun laneCenter(lane: Double): Double = HARD_SHOULDER + LANE_WIDTH * (lane + 0.5)

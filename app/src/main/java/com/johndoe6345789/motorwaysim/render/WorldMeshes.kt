@@ -53,16 +53,28 @@ object WorldMeshes {
     private val TREE_C = 0xFF2C5426.toInt()
     private val POST = 0xFF7D8288.toInt()
     private val LAMP = 0xFFF5F0DC.toInt()
+    private val TILE = 0xFFD9D8D0.toInt()
+    private val SOFFIT = 0xFF7A7C7E.toInt()
     val GRASS = 0xFF54803C.toInt()
 
+    /** Underside of the roof over the underpass. */
+    const val TUNNEL_CEILING = -1.35
+
     /**
-     * The ground plane, drawn centred under the camera. It is tiled (huge triangles lose depth
-     * precision when clipped) and sits a little below road level so roads never z-fight with it.
+     * The ground plane, drawn centred under the camera along the motorway. It is tiled (huge
+     * triangles lose depth precision when clipped) and sits a little below road level so roads
+     * never z-fight with it. It leaves out the motorway corridor, which the chunks surface
+     * themselves so that the underpass cuttings can open up below ground level.
      */
     val ground: Mesh by lazy {
         val b = MeshBuilder(32 * 32 * 6).color(GRASS)
         val tile = 250.0
-        for (i in -16 until 16) for (j in -16 until 16) b.flat(i * tile, j * tile, (i + 1) * tile, (j + 1) * tile, -0.15)
+        val hole = Road.CUTTING_HALF_WIDTH
+        for (i in -16 until 16) for (j in -16 until 16) {
+            val x0 = if (i == 0) hole else i * tile
+            val x1 = if (i == -1) -hole else (i + 1) * tile
+            b.flat(x0, j * tile, x1, (j + 1) * tile, -0.15)
+        }
         b.build()
     }
 
@@ -74,6 +86,7 @@ object WorldMeshes {
         val signs = ArrayList<SignFace>()
         for (cw in Carriageway.entries) carriageway(b, signs, cw, y0)
         centralReservation(b, y0)
+        tunnel(b, y0)
         roadside(b, y0)
         val by = Terrain.bridgeY(y0 + CHUNK / 2)
         if (by >= y0 && by < y0 + CHUNK) overbridge(b, by - y0)
@@ -150,16 +163,20 @@ object WorldMeshes {
         fun x(m: Double) = cw.worldX(m)
         fun y(s: Double) = cw.worldY(s) - y0
 
-        /** Flat rectangle across lateral range [m0, m1] and carriageway range [sa, sb]. */
-        fun strip(m0: Double, m1: Double, sa: Double, sb: Double, z: Double) {
+        /** Road surface height at carriageway position [s]. */
+        fun z(s: Double) = Road.motorwayZ(cw.worldY(s))
+
+        /** Rectangle on the road surface, [dz] above it, across lateral range [m0, m1] and carriageway range [sa, sb]. */
+        fun strip(m0: Double, m1: Double, sa: Double, sb: Double, dz: Double) {
             val xa = x(m0); val xb = x(m1); val ya = y(sa); val yb = y(sb)
-            b.quad(xa, ya, z, xb, ya, z, xb, yb, z, xa, yb, z)
+            val za = z(sa) + dz; val zb = z(sb) + dz
+            b.quad(xa, ya, za, xb, ya, za, xb, yb, zb, xa, yb, zb)
         }
 
         fun stud(m: Double, s: Double, color: Int) {
             b.color(color, 1f)
-            val xc = x(m); val yc = y(s)
-            b.box(xc - 0.08, xc + 0.08, yc - 0.12, yc + 0.12, 0.0, 0.04)
+            val xc = x(m); val yc = y(s); val zc = z(s)
+            b.box(xc - 0.08, xc + 0.08, yc - 0.12, yc + 0.12, zc, zc + 0.04)
         }
     }
 
@@ -184,6 +201,11 @@ object WorldMeshes {
             b.color(PAINT)
             c.strip(offside - 0.1, offside + 0.1, s, sb, 0.025)
             if (!extra) c.strip(hs - 0.1, hs + 0.1, s, sb, 0.025)
+            // Verge, and the retaining wall that lines the underpass cutting.
+            b.color(GRASS)
+            c.strip(VERGE_M, -0.35, s, sb, -0.03)
+            if (!extra) c.strip(-0.35, 0.0, s, sb, -0.03)
+            cuttingWall(c, s, sb)
             s = sb
         }
         // Dashed markings: lane lines are 2 m marks with 7 m gaps; the extra lane at
@@ -209,11 +231,12 @@ object WorldMeshes {
             val ps = p * 100.0
             if (!Road.hasExtraLane(ps)) {
                 b.color(STUD_WHITE)
-                val xc = c.x(-0.9); val yc = c.y(ps)
-                b.box(xc - 0.07, xc + 0.07, yc - 0.07, yc + 0.07, 0.0, 1.0)
+                val xc = c.x(-0.9); val yc = c.y(ps); val zc = c.z(ps)
+                b.box(xc - 0.07, xc + 0.07, yc - 0.07, yc + 0.07, zc, zc + 1.0)
                 b.color(0xFF101010.toInt())
-                b.box(xc - 0.075, xc + 0.075, yc - 0.075, yc + 0.075, 0.75, 0.9)
-                if (Math.floorMod(p, 5L) == 0L && abs(c.y(ps) + y0 - Terrain.bridgeY(c.y(ps) + y0)) > 15) {
+                b.box(xc - 0.075, xc + 0.075, yc - 0.075, yc + 0.075, zc + 0.75, zc + 0.9)
+                // Driver location signs stand on the verge, so not in the walled cutting.
+                if (Math.floorMod(p, 5L) == 0L && zc == 0.0 && abs(c.y(ps) + y0 - Terrain.bridgeY(c.y(ps) + y0)) > 15) {
                     post(b, c.x(-2.4), c.y(ps), 2.4)
                     signs += face(c, -3.0, -1.8, ps, 1.2, 2.3, if (cw == Carriageway.NORTH) "dls_A" else "dls_B")
                 }
@@ -267,6 +290,34 @@ object WorldMeshes {
 
     private const val HEDGE_M = -14.0
 
+    /** Outer edge of the verge, where the cutting's retaining wall stands (lateral metres). */
+    private val VERGE_M = Road.CR_HALF + Road.WIDTH - Road.CUTTING_HALF_WIDTH
+
+    /**
+     * The retaining wall from the verge up to ground level, facing the road, with a parapet along
+     * the top. Inside the covered section it is tiled and runs up into the roof. Where the road is
+     * at ground level it is just a skirt down to the ground plane, closing the corridor's edge.
+     */
+    private fun cuttingWall(c: Ctx, sa: Double, sb: Double) {
+        val b = c.b
+        val x = c.x(VERGE_M)
+        val ya = c.y(sa); val yb = c.y(sb)
+        val za = c.z(sa); val zb = c.z(sb)
+        val mid = (c.y(sa) + c.y(sb)) / 2 + c.y0
+        val covered = Road.inTunnel(mid)
+        b.color(if (covered) TILE else CONCRETE)
+        // Counter-clockwise seen from the road for both carriageways (y runs with s northbound, against it southbound).
+        b.quad(x, ya, za - 0.03, x, yb, zb - 0.03, x, yb, GROUND, x, ya, GROUND)
+        if (!covered && min(za, zb) < -0.8) {
+            val xo = c.x(VERGE_M - 0.35)
+            b.color(CONCRETE)
+            b.box(min(x, xo), max(x, xo), min(ya, yb), max(ya, yb), GROUND, GROUND + 1.0)
+        }
+    }
+
+    /** Height of the ground plane. */
+    private const val GROUND = -0.15
+
     private fun dashes(c: Ctx, m: Double, half: Double, period: Double, length: Double, sLo: Double, sHi: Double, where: (Double) -> Boolean) {
         var k = ceil(sLo / period).toLong()
         while (k * period < sHi) {
@@ -284,63 +335,114 @@ object WorldMeshes {
     /** A sign face across lateral range [m0, m1] at carriageway position [s], facing oncoming traffic. */
     private fun face(c: Ctx, m0: Double, m1: Double, s: Double, zBottom: Double, zTop: Double, key: String): SignFace {
         val y = c.y(s) - c.cw.dir * 0.12 + c.y0
+        val z = c.z(s)
         // Seen by approaching drivers, the lower lateral position is on their left.
-        return SignFace(c.x(m0), y, c.x(m1), y, zBottom, zTop, key)
+        return SignFace(c.x(m0), y, c.x(m1), y, z + zBottom, z + zTop, key)
     }
 
     private fun gantry(c: Ctx, s: Double) {
         val b = c.b
         val y = c.y(s)
+        val z = c.z(s)
         val xa = c.x(-1.8)
         val xb = c.x(Road.WIDTH + 1.15)
         b.color(STEEL)
         for (m in doubleArrayOf(-1.5, Road.WIDTH + 0.85)) {
             val xm = c.x(m)
-            b.box(xm - 0.3, xm + 0.3, y - 0.3, y + 0.3, 0.0, 7.6)
+            b.box(xm - 0.3, xm + 0.3, y - 0.3, y + 0.3, z, z + 7.6)
         }
-        b.box(min(xa, xb), max(xa, xb), y - 0.6, y + 0.6, 6.5, 7.6)
+        b.box(min(xa, xb), max(xa, xb), y - 0.6, y + 0.6, z + 6.5, z + 7.6)
         b.color(HOUSING)
         for (l in 0 until Road.LANES) {
             val xm = c.x(Road.laneCenter(l.toDouble()))
-            b.box(xm - 1.05, xm + 1.05, y - 0.25, y + 0.25, 4.7, 6.5)
+            b.box(xm - 1.05, xm + 1.05, y - 0.25, y + 0.25, z + 4.7, z + 6.5)
         }
         val v0 = c.x(0.1)
         val v1 = c.x(Road.HARD_SHOULDER - 0.1)
-        b.box(min(v0, v1), max(v0, v1), y - 0.25, y + 0.25, 5.0, 6.5)
+        b.box(min(v0, v1), max(v0, v1), y - 0.25, y + 0.25, z + 5.0, z + 6.5)
     }
 
     /** Where the face of gantry signals sit, for drawing the live displays. */
     fun gantryFaces(cw: Carriageway, s: Double, out: (lane: Int, face: SignFace) -> Unit) {
         val y = cw.worldY(s) - cw.dir * 0.27
+        val z = Road.motorwayZ(cw.worldY(s))
         for (l in 0 until Road.LANES) {
             val m = Road.laneCenter(l.toDouble())
-            out(l, SignFace(cw.worldX(m - 0.95), y, cw.worldX(m + 0.95), y, 4.75, 6.45, ""))
+            out(l, SignFace(cw.worldX(m - 0.95), y, cw.worldX(m + 0.95), y, z + 4.75, z + 6.45, ""))
         }
-        out(-1, SignFace(cw.worldX(0.2), y, cw.worldX(Road.HARD_SHOULDER - 0.2), y, 5.05, 6.45, ""))
+        out(-1, SignFace(cw.worldX(0.2), y, cw.worldX(Road.HARD_SHOULDER - 0.2), y, z + 5.05, z + 6.45, ""))
     }
 
     private fun centralReservation(b: MeshBuilder, y0: Double) {
         val h = Road.CR_HALF
-        b.color(CONCRETE)
-        b.flat(-h, 0.0, h, CHUNK, 0.01)
-        // Concrete step barrier.
-        b.color(BARRIER)
-        b.quad(-0.3, 0.0, 0.0, -0.12, 0.0, 0.9, -0.12, CHUNK, 0.9, -0.3, CHUNK, 0.0)
-        b.quad(0.3, CHUNK, 0.0, 0.12, CHUNK, 0.9, 0.12, 0.0, 0.9, 0.3, 0.0, 0.0)
-        b.flat(-0.12, 0.0, 0.12, CHUNK, 0.9)
-        // Lighting columns every 40 m, except under the roundabouts.
+        var ya = 0.0
+        while (ya < CHUNK - 1e-6) {
+            val yb = min(CHUNK, ya + 10.0)
+            val za = Road.motorwayZ(y0 + ya)
+            val zb = Road.motorwayZ(y0 + yb)
+            b.color(CONCRETE)
+            b.quad(-h, ya, za + 0.01, h, ya, za + 0.01, h, yb, zb + 0.01, -h, yb, zb + 0.01)
+            // Concrete step barrier.
+            b.color(BARRIER)
+            b.quad(-0.3, ya, za, -0.12, ya, za + 0.9, -0.12, yb, zb + 0.9, -0.3, yb, zb)
+            b.quad(0.3, yb, zb, 0.12, yb, zb + 0.9, 0.12, ya, za + 0.9, 0.3, ya, za)
+            b.quad(-0.12, ya, za + 0.9, 0.12, ya, za + 0.9, 0.12, yb, zb + 0.9, -0.12, yb, zb + 0.9)
+            ya = yb
+        }
+        // Lighting columns every 40 m, except in the covered section under the roundabouts.
         var k = ceil(y0 / 40).toLong()
         while (k * 40 < y0 + CHUNK) {
             val ly = k * 40 - y0
+            val z = Road.motorwayZ(k * 40.0)
             if (abs(Road.junctionOffset(k * 40.0)) > 80 && abs(k * 40.0 - Terrain.bridgeY(k * 40.0)) > 12) {
                 b.color(STEEL)
-                b.cylinder(0.0, ly, 0.9, 12.0, 0.13, 6)
-                b.box(-2.6, 2.6, ly - 0.06, ly + 0.06, 11.85, 12.0)
+                b.cylinder(0.0, ly, z + 0.9, z + 12.0, 0.13, 6)
+                b.box(-2.6, 2.6, ly - 0.06, ly + 0.06, z + 11.85, z + 12.0)
                 b.color(LAMP, 0.7f)
-                b.box(-2.9, -2.1, ly - 0.2, ly + 0.2, 11.7, 11.85)
-                b.box(2.1, 2.9, ly - 0.2, ly + 0.2, 11.7, 11.85)
+                b.box(-2.9, -2.1, ly - 0.2, ly + 0.2, z + 11.7, z + 11.85, bottom = true)
+                b.box(2.1, 2.9, ly - 0.2, ly + 0.2, z + 11.7, z + 11.85, bottom = true)
             }
             k++
+        }
+    }
+
+    /**
+     * The covered section of an underpass: a roof at ground level carrying the roundabout, with
+     * a lit concrete soffit, a row of columns along the central reservation, and a headwall
+     * over each portal.
+     */
+    private fun tunnel(b: MeshBuilder, y0: Double) {
+        val cy = Road.junctionY(Road.junctionNearest(y0 + CHUNK / 2))
+        val lo = max(y0, cy - Road.TUNNEL_HALF)
+        val hi = min(y0 + CHUNK, cy + Road.TUNNEL_HALF)
+        if (lo >= hi) return
+        val w = Road.CUTTING_HALF_WIDTH
+        val ya = lo - y0
+        val yb = hi - y0
+        val floor = -Road.UNDERPASS_DEPTH
+        b.color(GRASS)
+        b.flat(-w, ya, w, yb, GROUND)
+        b.color(SOFFIT)
+        b.quad(-w, yb, TUNNEL_CEILING, w, yb, TUNNEL_CEILING, w, ya, TUNNEL_CEILING, -w, ya, TUNNEL_CEILING)
+        // Strip lights over each carriageway, and columns between them.
+        var k = ceil(lo / 6).toLong()
+        while (k * 6 < hi) {
+            val ly = k * 6 - y0
+            b.color(LAMP, 0.95f)
+            for (x in doubleArrayOf(-15.4, -6.4, 6.4, 15.4)) b.box(x - 0.25, x + 0.25, ly - 1.2, ly + 1.2, TUNNEL_CEILING - 0.1, TUNNEL_CEILING, bottom = true)
+            if (Math.floorMod(k, 2L) == 0L) {
+                b.color(CONCRETE)
+                b.box(-0.35, 0.35, ly - 0.35, ly + 0.35, floor, TUNNEL_CEILING)
+            }
+            k++
+        }
+        // Headwalls over the portals, rising to a parapet above the ground.
+        for (end in doubleArrayOf(-1.0, 1.0)) {
+            val py = cy + end * Road.TUNNEL_HALF
+            if (py < y0 || py >= y0 + CHUNK) continue
+            val ly = py - y0
+            b.color(CONCRETE)
+            b.box(-w - 0.4, w + 0.4, ly - 0.4, ly + 0.4, TUNNEL_CEILING - 0.3, GROUND + 1.0, bottom = true)
         }
     }
 
@@ -411,7 +513,7 @@ object WorldMeshes {
             val out = Road.RING_WIDTH / 2 + 1.2
             val ox = p.x + sin(p.heading) * out
             val oy = p.y - cos(p.heading) * out - cy
-            post(b, ox, oy, Road.RING_HEIGHT + 2.4)
+            post(b, ox, oy, 2.4)
             // Facing approaching drivers: left edge further back along the ring.
             val hx = cos(p.heading)
             val hy = sin(p.heading)
@@ -420,19 +522,22 @@ object WorldMeshes {
             signs += SignFace(
                 ox - rx * 1.4 - hx * 0.1, oy - ry * 1.4 - hy * 0.1 + cy,
                 ox + rx * 1.4 - hx * 0.1, oy + ry * 1.4 - hy * 0.1 + cy,
-                Road.RING_HEIGHT + 1.2, Road.RING_HEIGHT + 2.5, "exit_${port.name}",
+                1.2, 2.5, "exit_${port.name}",
             )
         }
         return WorldPiece(b.build(), cy, signs)
     }
 
+    /** The roundabout at ground level: carriageway, kerbs, a planted central island and lighting. */
     private fun ring(b: MeshBuilder, j: Junction) {
         val r = Road.RING_RADIUS
         val ri = r - Road.RING_WIDTH / 2
         val ro = r + Road.RING_WIDTH / 2
-        val z = Road.RING_HEIGHT
+        val z = 0.0
+        val kerb = 0.14
         val seg = 120
         val armAngles = (j.entries + j.exits).map { 2 * PI * (1 - it.ringS / j.ring.length) + Road.deg(Junction.RING_START) }
+        fun nearArm(a: Double, within: Double) = armAngles.any { abs(wrap(it - a)) < Road.deg(within) }
         for (i in 0 until seg) {
             val a0 = 2 * PI * i / seg
             val a1 = 2 * PI * (i + 1) / seg
@@ -442,30 +547,56 @@ object WorldMeshes {
             b.color(PAINT)
             val e0 = ri + 0.35; val e1 = ri + 0.5
             b.quad(e0 * c0, e0 * s0, z + 0.02, e1 * c0, e1 * s0, z + 0.02, e1 * c1, e1 * s1, z + 0.02, e0 * c1, e0 * s1, z + 0.02)
-            val f0 = ro - 0.5; val f1 = ro - 0.35
-            val nearArm = armAngles.any { abs(wrap(it - (a0 + a1) / 2)) < Road.deg(9.0) }
-            if (!nearArm) {
+            val arm = nearArm((a0 + a1) / 2, 9.0)
+            if (!arm) {
+                val f0 = ro - 0.5; val f1 = ro - 0.35
                 b.quad(f0 * c0, f0 * s0, z + 0.02, f1 * c0, f1 * s0, z + 0.02, f1 * c1, f1 * s1, z + 0.02, f0 * c1, f0 * s1, z + 0.02)
             }
-            // Deck edges and underside.
-            b.color(DECK)
-            b.quad(ro * c0, ro * s0, z - 1.1, ro * c1, ro * s1, z - 1.1, ro * c1, ro * s1, z, ro * c0, ro * s0, z)
-            b.quad(ri * c1, ri * s1, z - 1.1, ri * c0, ri * s0, z - 1.1, ri * c0, ri * s0, z, ri * c1, ri * s1, z)
-            b.quad(ri * c1, ri * s1, z - 1.1, ro * c1, ro * s1, z - 1.1, ro * c0, ro * s0, z - 1.1, ri * c0, ri * s0, z - 1.1)
-            // Parapets: always on the inside, outside except where roads join.
-            b.color(BARRIER)
-            parapet(b, ri, ri - 0.3, c0, s0, c1, s1, z)
-            if (!nearArm) parapet(b, ro, ro + 0.3, c0, s0, c1, s1, z)
+            // Kerbs: round the central island, and the outer edge except where roads join.
+            b.color(CONCRETE)
+            kerbRing(b, ri - 0.3, ri, c0, s0, c1, s1, z + kerb, inward = false)
+            if (!arm) kerbRing(b, ro, ro + 0.3, c0, s0, c1, s1, z + kerb, inward = true)
+            // The island: grass, slightly raised.
+            b.color(GRASS)
+            val ii = ri - 0.3
+            b.quad(0.0, 0.0, z + kerb, ii * c0, ii * s0, z + kerb, ii * c1, ii * s1, z + kerb, 0.0, 0.0, z + kerb)
         }
-        // Piers: outside the carriageways and in the central reservation.
-        b.color(DECK)
-        for (i in 0 until 24) {
-            val a = 2 * PI * i / 24
-            val x = r * cos(a)
-            val y = r * sin(a)
-            if (abs(x) in 1.0..(Road.CR_HALF + Road.WIDTH + 1.5)) continue
-            b.box(x - 0.7, x + 0.7, y - 0.7, y + 0.7, 0.0, z - 1.1)
+        // Trees and shrubs on the island.
+        for (i in 0 until 9) {
+            val h = hash(j.k * 31L + i)
+            val a = 2 * PI * i / 9 + (h % 100) / 100.0
+            val rr = 12.0 + (h shr 8) % 26
+            val size = 0.6 + ((h shr 16) % 50) / 100.0
+            val x = rr * cos(a)
+            val y = rr * sin(a)
+            b.color(TRUNK)
+            b.box(x - 0.18, x + 0.18, y - 0.18, y + 0.18, z + kerb, z + kerb + 2.2 * size)
+            b.color(if (i % 2 == 0) TREE_A else TREE_B)
+            b.crown(x, y, z + kerb + 1.3 * size, z + kerb + 7.0 * size, 2.6 * size)
         }
+        // Lighting columns round the outside, leaning their lanterns over the carriageway.
+        for (i in 0 until 12) {
+            val a = 2 * PI * (i + 0.5) / 12
+            if (nearArm(a, 14.0)) continue
+            val ca = cos(a); val sa = sin(a)
+            val rc = ro + 1.6
+            b.color(STEEL)
+            b.cylinder(rc * ca, rc * sa, z, z + 10.0, 0.12, 6)
+            val rl = ro - 1.2
+            b.color(LAMP, 0.7f)
+            b.box(rl * ca - 0.35, rl * ca + 0.35, rl * sa - 0.35, rl * sa + 0.35, z + 9.75, z + 9.9, bottom = true)
+            b.color(STEEL)
+            val x0 = min(rc * ca, rl * ca); val x1 = max(rc * ca, rl * ca)
+            val y0 = min(rc * sa, rl * sa); val y1 = max(rc * sa, rl * sa)
+            b.box(x0 - 0.05, x1 + 0.05, y0 - 0.05, y1 + 0.05, z + 9.9, z + 10.0)
+        }
+    }
+
+    /** A kerb between radii [ra] and [rb] from angle 0 to 1, with its face towards the carriageway. */
+    private fun kerbRing(b: MeshBuilder, ra: Double, rb: Double, c0: Double, s0: Double, c1: Double, s1: Double, top: Double, inward: Boolean) {
+        b.quad(ra * c0, ra * s0, top, rb * c0, rb * s0, top, rb * c1, rb * s1, top, ra * c1, ra * s1, top)
+        if (inward) b.quad(ra * c1, ra * s1, 0.0, ra * c0, ra * s0, 0.0, ra * c0, ra * s0, top, ra * c1, ra * s1, top)
+        else b.quad(rb * c0, rb * s0, 0.0, rb * c1, rb * s1, 0.0, rb * c1, rb * s1, top, rb * c0, rb * s0, top)
     }
 
     private fun wrap(a: Double): Double {
@@ -473,19 +604,6 @@ object WorldMeshes {
         if (r > PI) r -= 2 * PI
         if (r < -PI) r += 2 * PI
         return r
-    }
-
-    /** A low concrete wall on the ring between radii [ra] (road side) and [rb], from angle 0 to 1. */
-    private fun parapet(b: MeshBuilder, ra: Double, rb: Double, c0: Double, s0: Double, c1: Double, s1: Double, z: Double) {
-        val h = 0.9
-        // Each face is drawn with both windings so it is lit from either side; the wall's
-        // thickness keeps the two faces apart, avoiding z-fighting.
-        for (r in doubleArrayOf(ra, rb)) {
-            b.quad(r * c0, r * s0, z, r * c1, r * s1, z, r * c1, r * s1, z + h, r * c0, r * s0, z + h)
-            b.quad(r * c1, r * s1, z, r * c0, r * s0, z, r * c0, r * s0, z + h, r * c1, r * s1, z + h)
-        }
-        b.quad(ra * c0, ra * s0, z + h, rb * c0, rb * s0, z + h, rb * c1, rb * s1, z + h, ra * c1, ra * s1, z + h)
-        b.quad(rb * c0, rb * s0, z + h, ra * c0, ra * s0, z + h, ra * c1, ra * s1, z + h, rb * c1, rb * s1, z + h)
     }
 
     private fun ribbon(b: MeshBuilder, j: Junction, link: PathLink, cy: Double) {
@@ -520,18 +638,6 @@ object WorldMeshes {
                 val centreDash = local && link.kind != LinkKind.LOOP
                 if (!centreDash || ((s / 6).toInt() % 2 == 0 && link.kind == LinkKind.LOCAL_IN)) {
                     edgeLine(b, rx0, ry0, rx1, ry1, lx0, ly0, lx1, ly1, z0, z1, 0.15, 0.3)
-                }
-                // Retaining walls and parapets where the road is raised.
-                if (z0 > 0.3 || z1 > 0.3) {
-                    b.color(DECK)
-                    b.quad(lx1, ly1, 0.0, lx0, ly0, 0.0, lx0, ly0, z0, lx1, ly1, z1)
-                    b.quad(rx0, ry0, 0.0, rx1, ry1, 0.0, rx1, ry1, z1, rx0, ry0, z0)
-                }
-                if (z0 > 1.5 && z1 > 1.5) {
-                    b.color(BARRIER)
-                    // Local roads are two-way: only their outer (left) edges get a wall.
-                    parapetAlong(b, lx0, ly0, lx1, ly1, z0, z1)
-                    if (!local) parapetAlong(b, rx1, ry1, rx0, ry0, z1, z0)
                 }
             }
             prev = if (inside) null else cur
@@ -574,17 +680,5 @@ object WorldMeshes {
         val cross = (q0x - p0x) * (p1y - p0y) - (q0y - p0y) * (p1x - p0x)
         if (cross < 0) b.quad(p0x, p0y, z0 + 0.02, p1x, p1y, z1 + 0.02, q1x, q1y, z1 + 0.02, q0x, q0y, z0 + 0.02)
         else b.quad(p0x, p0y, z0 + 0.02, q0x, q0y, z0 + 0.02, q1x, q1y, z1 + 0.02, p1x, p1y, z1 + 0.02)
-    }
-
-    /** A wall along the road edge from (x0, y0) to (x1, y1); its outside is to the left of that direction. */
-    private fun parapetAlong(b: MeshBuilder, x0: Double, y0: Double, x1: Double, y1: Double, z0: Double, z1: Double) {
-        val len = hypot(x1 - x0, y1 - y0)
-        if (len < 1e-6) return
-        val ox = -(y1 - y0) / len * 0.3
-        val oy = (x1 - x0) / len * 0.3
-        val h = 0.9
-        b.quad(x0, y0, z0, x1, y1, z1, x1, y1, z1 + h, x0, y0, z0 + h) // road side
-        b.quad(x1 + ox, y1 + oy, z1, x0 + ox, y0 + oy, z0, x0 + ox, y0 + oy, z0 + h, x1 + ox, y1 + oy, z1 + h) // outside
-        b.quad(x1, y1, z1 + h, x1 + ox, y1 + oy, z1 + h, x0 + ox, y0 + oy, z0 + h, x0, y0, z0 + h) // top
     }
 }
